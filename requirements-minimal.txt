@@ -1,0 +1,33 @@
+# Memory-optimized requirements for Render.com 512MB limit
+# Core web framework - essential
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+jinja2>=3.1.0
+python-multipart>=0.0.6
+
+# Database - essential for data storage
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+
+# HTTP requests - essential for API calls
+requests>=2.31.0
+
+# XML parsing - essential for ENTSO-E API
+lxml>=4.9.0
+xmltodict>=0.13.0
+
+# Configuration - essential
+pyyaml>=6.0
+python-dotenv>=1.0.0
+pytz>=2023.3
+
+# Production server - essential
+gunicorn>=21.2.0
+
+# Removed heavy packages to save memory:
+# - pandas (>100MB) - can use basic Python data structures
+# - numpy (>50MB) - not essential for basic functionality  
+# - scikit-learn (>100MB) - forecasting can be added later
+# - matplotlib, seaborn, plotly (>150MB combined) - charts can be done with JavaScript
+# - statsmodels (>50MB) - advanced analytics can be added later
+# - schedule - can use simple background tasks instead
