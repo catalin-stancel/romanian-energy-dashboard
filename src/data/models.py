@@ -332,7 +332,12 @@ if __name__ == "__main__":
     # Create database and tables
     print("Creating database and tables...")
     engine = create_tables()
-    print(f"✅ Database created at: {config['database']['path']}")
+    
+    # Print appropriate success message based on database type
+    if 'path' in config['database']:
+        print(f"✅ Database created at: {config['database']['path']}")
+    else:
+        print("✅ Database configured successfully")
     
     # Test session creation
     session = get_session(engine)
