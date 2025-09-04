@@ -28,6 +28,16 @@
         .btn:hover {
             background: #5a6fd8;
         }
+        .btn.disabled {
+            background: #6c757d;
+            color: #adb5bd;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .btn.disabled:hover {
+            background: #6c757d;
+            transform: none;
+        }
         /* Loading bar system - Always visible countdown */
         .loading-bar-container {
             position: fixed;
@@ -532,7 +542,8 @@
 </head>
 <body>
     <div class="controls">
-        <button class="btn" onclick="refreshData()">🔄 Refresh Data</button>
+        <button class="btn" id="auto-refresh-btn" onclick="toggleAutoRefresh()">🔄 Auto-Refresh ON</button>
+        <button class="btn" onclick="manualRefresh()">↻ Manual Refresh</button>
         <button class="btn" onclick="collectData()">📥 Collect New Data</button>
         <button class="btn" onclick="testConnection()">🔗 Test API Connection</button>
     </div>
@@ -688,10 +699,86 @@
         let isRefreshing = false;
         const REFRESH_INTERVAL = 10000; // 10 seconds
 
+        // Auto-refresh state management
+        let autoRefreshEnabled = false; // Default to disabled
+
         // Day navigation state
         let currentDisplayDate = null; // The date currently being displayed (YYYY-MM-DD format)
         let totalIntervals = 96;
         let currentIntervalNumber = null;
+
+        // Auto-refresh toggle functionality
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            
+            // Save state to localStorage
+            localStorage.setItem('autoRefreshEnabled', autoRefreshEnabled.toString());
+            
+            // Update button appearance
+            updateAutoRefreshButton();
+            
+            // Handle countdown timer
+            if (autoRefreshEnabled) {
+                // Re-enable auto-refresh
+                if (!isRefreshing && !countdownTimer) {
+                    startCountdownTimer();
+                }
+            } else {
+                // Disable auto-refresh
+                if (countdownTimer) {
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                }
+                updateLoadingBarForDisabled();
+            }
+        }
+
+        function updateAutoRefreshButton() {
+            const button = document.getElementById('auto-refresh-btn');
+            const icon = document.querySelector('.loading-bar-icon');
+            
+            if (autoRefreshEnabled) {
+                button.textContent = '🔄 Auto-Refresh ON';
+                button.classList.remove('disabled');
+                button.title = 'Click to disable auto-refresh';
+                if (icon) icon.textContent = '🔄';
+            } else {
+                button.textContent = '⏸️ Auto-Refresh OFF';
+                button.classList.add('disabled');
+                button.title = 'Click to enable auto-refresh';
+                if (icon) icon.textContent = '⏸️';
+            }
+        }
+
+        function updateLoadingBarForDisabled() {
+            const textElement = document.getElementById('loading-bar-text');
+            const fillElement = document.getElementById('loading-bar-fill');
+            
+            if (!autoRefreshEnabled) {
+                textElement.textContent = 'Auto-refresh disabled - Use manual refresh';
+                fillElement.style.width = '0%';
+                fillElement.style.background = '#6c757d';
+            } else {
+                fillElement.style.background = 'linear-gradient(90deg, #667eea, #764ba2)';
+            }
+        }
+
+        // Manual refresh function (separate from auto-refresh)
+        function manualRefresh() {
+            refreshData();
+        }
+
+        // Load auto-refresh state from localStorage
+        function loadAutoRefreshState() {
+            const saved = localStorage.getItem('autoRefreshEnabled');
+            if (saved !== null) {
+                autoRefreshEnabled = saved === 'true';
+            }
+            updateAutoRefreshButton();
+            if (!autoRefreshEnabled) {
+                updateLoadingBarForDisabled();
+            }
+        }
 
         // Day navigation functions
         function previousDay() {
@@ -864,6 +951,12 @@
 
         // Countdown loading bar functions
         function startCountdownTimer() {
+            // Don't start countdown if auto-refresh is disabled
+            if (!autoRefreshEnabled) {
+                updateLoadingBarForDisabled();
+                return;
+            }
+            
             if (countdownTimer) {
                 clearInterval(countdownTimer);
                 countdownTimer = null;
@@ -876,11 +969,12 @@
             // Reset the bar
             fillElement.style.width = '0%';
             fillElement.style.transition = 'width 0.1s ease-out';
+            fillElement.style.background = 'linear-gradient(90deg, #667eea, #764ba2)';
             textElement.textContent = 'Next refresh in 10s...';
             
             countdownTimer = setInterval(() => {
-                if (isRefreshing) {
-                    return; // Don't update countdown while refreshing
+                if (isRefreshing || !autoRefreshEnabled) {
+                    return; // Don't update countdown while refreshing or if disabled
                 }
                 
                 const elapsed = Date.now() - countdownStartTime;
@@ -888,12 +982,14 @@
                 const remainingSeconds = Math.max(0, Math.ceil((REFRESH_INTERVAL - elapsed) / 1000));
                 
                 if (progress >= 100 || remainingSeconds <= 0) {
-                    // Time to refresh
-                    clearInterval(countdownTimer);
-                    countdownTimer = null;
-                    fillElement.style.width = '100%';
-                    textElement.textContent = 'Refreshing data...';
-                    refreshData();
+                    // Time to refresh (only if auto-refresh is still enabled)
+                    if (autoRefreshEnabled) {
+                        clearInterval(countdownTimer);
+                        countdownTimer = null;
+                        fillElement.style.width = '100%';
+                        textElement.textContent = 'Refreshing data...';
+                        refreshData();
+                    }
                 } else {
                     // Update progress bar and text
                     fillElement.style.width = `${progress}%`;
@@ -1679,6 +1775,9 @@
 
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
+            // Load auto-refresh state from localStorage first
+            loadAutoRefreshState();
+            
             // Update time every second
             updateCurrentTime();
             setInterval(updateCurrentTime, 1000);
@@ -1690,7 +1789,7 @@
             });
             testConnection();
             
-            // Start the countdown timer for auto-refresh
+            // Start the countdown timer for auto-refresh (respects loaded state)
             startCountdownTimer();
         });
     </script>
