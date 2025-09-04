@@ -1,0 +1,1698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Romanian Energy Balancing Market Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 80px 20px 20px 20px; /* Add top padding for fixed loading bar */
+            background-color: #f5f5f5;
+        }
+        .controls {
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 0 5px;
+        }
+        .btn:hover {
+            background: #5a6fd8;
+        }
+        /* Loading bar system - Always visible countdown */
+        .loading-bar-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            width: 100%;
+            background: white;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            padding: 8px 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .loading-bar-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #333;
+            font-weight: 600;
+        }
+        
+        .loading-bar-icon {
+            margin-right: 8px;
+            font-size: 16px;
+        }
+        
+        .loading-bar-track {
+            width: 100%;
+            height: 6px;
+            background: #f0f0f0;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        
+        .loading-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 3px;
+            width: 0%;
+            transition: width 0.3s ease-out;
+        }
+        
+        /* Error notification system (bottom right) */
+        .notification-container {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            max-width: 350px;
+        }
+        
+        .notification {
+            background: white;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border-left: 4px solid #dc3545;
+            transform: translateX(400px);
+            opacity: 0;
+            animation: slideIn 0.3s ease-out forwards;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .notification-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        
+        .notification-icon {
+            font-size: 18px;
+            margin-right: 8px;
+        }
+        
+        .notification-title {
+            font-weight: 600;
+            color: #333;
+            flex: 1;
+        }
+        
+        .notification-close {
+            background: none;
+            border: none;
+            font-size: 18px;
+            color: #999;
+            cursor: pointer;
+            padding: 0;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .notification-close:hover {
+            color: #666;
+        }
+        
+        .notification-message {
+            color: #666;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        
+        .notification-progress {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            height: 3px;
+            background: rgba(220, 53, 69, 0.3);
+            animation: progressBar 5s linear forwards;
+        }
+        
+        @keyframes slideIn {
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        
+        @keyframes slideOut {
+            to {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+        }
+        
+        @keyframes progressBar {
+            from { width: 100%; }
+            to { width: 0%; }
+        }
+        
+        .notification.removing {
+            animation: slideOut 0.3s ease-in forwards;
+        }
+        
+        /* Dual view layout */
+        .dual-view {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            height: calc(100vh - 80px);
+        }
+        
+        .table-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .table-header {
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .table-header h3 {
+            margin: 0;
+            color: #333;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .current-time {
+            font-size: 0.9em;
+            color: #666;
+            font-weight: normal;
+        }
+        
+        .table-wrapper {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        
+        .interval-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+        
+        .interval-table th {
+            background: #f8f9fa;
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 2px solid #dee2e6;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            white-space: nowrap;
+            min-width: fit-content;
+        }
+        
+        .interval-table td {
+            padding: 6px 12px;
+            border-bottom: 1px solid #dee2e6;
+            transition: all 0.3s ease;
+        }
+        
+        .interval-table tr:hover {
+            background-color: #f8f9fa;
+        }
+        
+        /* Row highlighting - Current interval has highest priority */
+        .current-interval {
+            background-color: #fff3cd !important;
+            border-left: 4px solid #ffc107 !important;
+        }
+        
+        .next-interval {
+            background-color: #d1ecf1 !important;
+            border-left: 4px solid #17a2b8 !important;
+        }
+        
+        /* Price-based row coloring - lower priority than current interval */
+        .positive-price:not(.current-interval) {
+            background-color: #d4edda !important;
+        }
+        
+        .negative-price:not(.current-interval) {
+            background-color: #f8d7da !important;
+        }
+        
+        .prediction-target {
+            background-color: #d4edda !important;
+            border-left: 4px solid #28a745;
+        }
+        
+        /* Status indicators */
+        .surplus {
+            color: #28a745;
+            font-weight: bold;
+        }
+        
+        .deficit {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        
+        .balanced {
+            color: #6c757d;
+        }
+        
+        .no-data {
+            color: #6c757d;
+            font-style: italic;
+        }
+        
+        /* Smooth transitions for data updates */
+        .data-updated {
+            background-color: #e7f3ff !important;
+            animation: dataUpdate 1s ease-out;
+        }
+        
+        @keyframes dataUpdate {
+            0% { background-color: #007bff; }
+            100% { background-color: transparent; }
+        }
+        
+        /* Loading overlay for smooth updates */
+        .table-container.updating::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            opacity: 0;
+            animation: fadeIn 0.2s ease-in-out forwards;
+        }
+        
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+        
+        .confidence {
+            font-size: 0.8em;
+            color: #666;
+        }
+        
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            font-size: 0.8em;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+        
+        .legend-current { background-color: #fff3cd; border-left: 3px solid #ffc107; }
+        .legend-next { background-color: #d1ecf1; border-left: 3px solid #17a2b8; }
+        .legend-delayed { background-color: #f8d7da; }
+        .legend-predicted { background-color: #d4edda; border-left: 3px solid #28a745; }
+        
+        /* Loading state */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .loading-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* Pagination Controls */
+        .pagination-container {
+            background: white;
+            border-radius: 10px;
+            padding: 15px 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin: 20px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            align-items: center;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        
+        .pagination-info {
+            font-size: 0.9em;
+            color: #666;
+            text-align: center;
+        }
+        
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 100%;
+        }
+        
+        .pagination-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.2s ease;
+        }
+        
+        .pagination-btn:hover:not(:disabled) {
+            background: #5a6fd8;
+            transform: translateY(-1px);
+        }
+        
+        .pagination-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .pagination-nav {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .page-numbers {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .page-number {
+            background: #f8f9fa;
+            color: #333;
+            border: 1px solid #dee2e6;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.2s ease;
+            min-width: 35px;
+            text-align: center;
+        }
+        
+        .page-number:hover {
+            background: #e9ecef;
+            border-color: #adb5bd;
+        }
+        
+        .page-number.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+        
+        .page-number.ellipsis {
+            cursor: default;
+            background: transparent;
+            border: none;
+        }
+        
+        .page-number.ellipsis:hover {
+            background: transparent;
+            border: none;
+        }
+        
+        #per-page-select {
+            padding: 6px 12px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            background: white;
+            font-size: 0.9em;
+            cursor: pointer;
+        }
+        
+        #jump-to-current-btn {
+            background: #28a745;
+        }
+        
+        #jump-to-current-btn:hover {
+            background: #218838;
+        }
+        
+        /* Responsive design */
+        @media (max-width: 1200px) {
+            .dual-view {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            
+            .table-container {
+                height: 500px;
+            }
+            
+            .pagination-controls {
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            .pagination-nav {
+                flex-wrap: wrap;
+            }
+            
+            .page-numbers {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .pagination-container {
+                padding: 10px 15px;
+            }
+            
+            .pagination-btn {
+                padding: 6px 12px;
+                font-size: 0.8em;
+            }
+            
+            .page-number {
+                padding: 4px 8px;
+                font-size: 0.8em;
+                min-width: 30px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button class="btn" onclick="refreshData()">🔄 Refresh Data</button>
+        <button class="btn" onclick="collectData()">📥 Collect New Data</button>
+        <button class="btn" onclick="testConnection()">🔗 Test API Connection</button>
+    </div>
+
+    <!-- Loading bar container -->
+    <div class="loading-bar-container" id="loading-bar-container">
+        <div class="loading-bar-header">
+            <span class="loading-bar-icon">🔄</span>
+            <span id="loading-bar-text">Refreshing data...</span>
+        </div>
+        <div class="loading-bar-track">
+            <div class="loading-bar-fill" id="loading-bar-fill"></div>
+        </div>
+    </div>
+
+    <!-- Error notification container -->
+    <div class="notification-container" id="notification-container"></div>
+
+    <!-- Day Navigation Controls -->
+    <div class="pagination-container">
+        <div class="pagination-info">
+            <span id="pagination-info">Showing all 96 intervals for <span id="current-display-date">today</span></span>
+        </div>
+        
+        <div class="pagination-controls">
+            <button class="pagination-btn" id="prev-day-btn" onclick="previousDay()" title="Previous day">
+                ← Previous Day
+            </button>
+            
+            <button class="pagination-btn" id="today-btn" onclick="goToToday()" title="Go to today">
+                📅 Today
+            </button>
+            
+            <button class="pagination-btn" id="next-day-btn" onclick="nextDay()" title="Next day">
+                Next Day →
+            </button>
+            
+            <button class="pagination-btn" id="jump-to-current-btn" onclick="jumpToCurrent()" title="Jump to current interval">
+                📍 Jump to Current Interval
+            </button>
+        </div>
+    </div>
+
+    <div class="dual-view">
+        <!-- Left side: Actual Data Table -->
+        <div class="table-container">
+            <div class="table-header">
+                <h3>
+                    📊 Actual Market Data
+                    <span class="current-time"><span id="current-date">--.--.----</span> <span id="current-time">--:--</span></span>
+                </h3>
+                <div class="data-freshness" id="data-freshness" style="font-size: 0.8em; color: #666; margin-top: 5px;"></div>
+            </div>
+            
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color legend-current"></div>
+                    <span>Current Interval</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #d4edda;"></div>
+                    <span>Positive Price</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #f8d7da;"></div>
+                    <span>Negative Price</span>
+                </div>
+            </div>
+            
+        <div class="table-wrapper" id="actual-table-wrapper">
+            <table class="interval-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Price</th>
+                        <th>Volume</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="actual-data-table">
+                    <tr>
+                        <td colspan="4" class="loading">
+                            <div class="loading-spinner"></div>
+                            Loading actual data...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        </div>
+
+        <!-- Right side: Power Generation Data Table -->
+        <div class="table-container">
+            <div class="table-header">
+                <h3>
+                    ⚡ Power Generation Data
+                    <span class="current-time"><span id="power-date">--.--.----</span> <span id="power-info">Real-time system status</span></span>
+                </h3>
+                <div class="data-freshness" id="power-data-freshness" style="font-size: 0.8em; color: #666; margin-top: 5px;"></div>
+            </div>
+            
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color legend-current"></div>
+                    <span>Current Interval</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #d4edda;"></div>
+                    <span>Surplus</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #f8d7da;"></div>
+                    <span>Deficit</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #fff3cd;"></div>
+                    <span>Balanced</span>
+                </div>
+            </div>
+            
+            <div class="table-wrapper" id="power-table-wrapper">
+                <table class="interval-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Production</th>
+                            <th>Consumption</th>
+                            <th>Imports</th>
+                            <th>Exports</th>
+                            <th>Net Balance</th>
+                            <th>Total Balance</th>
+                        </tr>
+                    </thead>
+                    <tbody id="power-generation-table">
+                        <tr>
+                            <td colspan="7" class="loading">
+                                <div class="loading-spinner"></div>
+                                Loading power generation data...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        let currentInterval = null;
+        let nextInterval = null;
+        let countdownTimer = null;
+        let countdownStartTime = null;
+        let isRefreshing = false;
+        const REFRESH_INTERVAL = 10000; // 10 seconds
+
+        // Day navigation state
+        let currentDisplayDate = null; // The date currently being displayed (YYYY-MM-DD format)
+        let totalIntervals = 96;
+        let currentIntervalNumber = null;
+
+        // Day navigation functions
+        function previousDay() {
+            if (!currentDisplayDate) {
+                // If no date is set, start from today and go to yesterday
+                const today = new Date();
+                today.setDate(today.getDate() - 1);
+                currentDisplayDate = today.toISOString().split('T')[0];
+            } else {
+                // Go to previous day
+                const date = new Date(currentDisplayDate);
+                date.setDate(date.getDate() - 1);
+                currentDisplayDate = date.toISOString().split('T')[0];
+            }
+            
+            updateDisplayDateInfo();
+            refreshDataForDate(currentDisplayDate);
+        }
+
+        function nextDay() {
+            if (!currentDisplayDate) {
+                // If no date is set, go to today
+                goToToday();
+                return;
+            }
+            
+            // Go to next day
+            const date = new Date(currentDisplayDate);
+            date.setDate(date.getDate() + 1);
+            currentDisplayDate = date.toISOString().split('T')[0];
+            
+            // Don't allow going beyond today
+            const today = new Date().toISOString().split('T')[0];
+            if (currentDisplayDate > today) {
+                currentDisplayDate = today;
+            }
+            
+            updateDisplayDateInfo();
+            refreshDataForDate(currentDisplayDate);
+        }
+
+        function goToToday() {
+            const today = new Date().toISOString().split('T')[0];
+            currentDisplayDate = today;
+            updateDisplayDateInfo();
+            refreshDataForDate(currentDisplayDate);
+        }
+
+        function updateDisplayDateInfo() {
+            const displayDateElement = document.getElementById('current-display-date');
+            const today = new Date().toISOString().split('T')[0];
+            
+            if (!currentDisplayDate || currentDisplayDate === today) {
+                displayDateElement.textContent = 'today';
+                displayDateElement.style.fontWeight = 'bold';
+                displayDateElement.style.color = '#28a745';
+            } else {
+                // Format date for display (DD.MM.YYYY)
+                const date = new Date(currentDisplayDate);
+                const formattedDate = date.toLocaleDateString('ro-RO', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric'
+                });
+                
+                // Calculate days difference
+                const daysDiff = Math.floor((new Date(today) - new Date(currentDisplayDate)) / (1000 * 60 * 60 * 24));
+                
+                if (daysDiff === 1) {
+                    displayDateElement.textContent = `yesterday (${formattedDate})`;
+                    displayDateElement.style.fontWeight = 'bold';
+                    displayDateElement.style.color = '#ffc107';
+                } else if (daysDiff > 1) {
+                    displayDateElement.textContent = `${daysDiff} days ago (${formattedDate})`;
+                    displayDateElement.style.fontWeight = 'bold';
+                    displayDateElement.style.color = '#dc3545';
+                } else {
+                    displayDateElement.textContent = formattedDate;
+                    displayDateElement.style.fontWeight = 'normal';
+                    displayDateElement.style.color = '#333';
+                }
+            }
+            
+            // Update button states
+            updateNavigationButtons();
+        }
+
+        function updateNavigationButtons() {
+            const today = new Date().toISOString().split('T')[0];
+            const nextDayBtn = document.getElementById('next-day-btn');
+            const todayBtn = document.getElementById('today-btn');
+            
+            // Disable next day button if we're already at today
+            nextDayBtn.disabled = (currentDisplayDate === today);
+            
+            // Highlight today button if we're viewing today
+            if (currentDisplayDate === today) {
+                todayBtn.style.background = '#28a745';
+                todayBtn.style.fontWeight = 'bold';
+            } else {
+                todayBtn.style.background = '#667eea';
+                todayBtn.style.fontWeight = 'normal';
+            }
+        }
+
+        async function refreshDataForDate(targetDate) {
+            try {
+                // Set refreshing flag to pause countdown
+                isRefreshing = true;
+                
+                // Show refresh progress
+                showRefreshProgress(10, `Loading data for ${targetDate}...`);
+                
+                // Load both tables with target date
+                const [actualData, powerData] = await Promise.all([
+                    loadActualData(targetDate),
+                    loadPowerGenerationData(targetDate)
+                ]);
+                
+                // Update current interval info only if viewing today
+                const today = new Date().toISOString().split('T')[0];
+                if (targetDate === today) {
+                    currentIntervalNumber = actualData.current_interval;
+                } else {
+                    currentIntervalNumber = null; // No current interval for historical data
+                }
+                
+                showRefreshProgress(100, 'Data loaded successfully!');
+                
+                // Reset refreshing flag and restart countdown only if viewing today
+                setTimeout(() => {
+                    isRefreshing = false;
+                    if (targetDate === today) {
+                        startCountdownTimer();
+                    }
+                }, 500);
+                
+            } catch (error) {
+                console.error('Error during refresh:', error);
+                isRefreshing = false;
+                showNotification(`Failed to load data for ${targetDate}`, 'error');
+                
+                // Only restart countdown if viewing today
+                const today = new Date().toISOString().split('T')[0];
+                if (targetDate === today) {
+                    startCountdownTimer();
+                }
+            }
+        }
+
+        // Update current time and date display
+        function updateCurrentTime() {
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('en-GB', { 
+                hour: '2-digit', 
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            // Romanian date format: DD.MM.YYYY
+            const dateString = now.toLocaleDateString('ro-RO', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric'
+            });
+            
+            document.getElementById('current-time').textContent = timeString;
+            document.getElementById('current-date').textContent = dateString;
+            document.getElementById('power-date').textContent = dateString;
+        }
+
+        // Countdown loading bar functions
+        function startCountdownTimer() {
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+            
+            countdownStartTime = Date.now();
+            const textElement = document.getElementById('loading-bar-text');
+            const fillElement = document.getElementById('loading-bar-fill');
+            
+            // Reset the bar
+            fillElement.style.width = '0%';
+            fillElement.style.transition = 'width 0.1s ease-out';
+            textElement.textContent = 'Next refresh in 10s...';
+            
+            countdownTimer = setInterval(() => {
+                if (isRefreshing) {
+                    return; // Don't update countdown while refreshing
+                }
+                
+                const elapsed = Date.now() - countdownStartTime;
+                const progress = Math.min(100, (elapsed / REFRESH_INTERVAL) * 100);
+                const remainingSeconds = Math.max(0, Math.ceil((REFRESH_INTERVAL - elapsed) / 1000));
+                
+                if (progress >= 100 || remainingSeconds <= 0) {
+                    // Time to refresh
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                    fillElement.style.width = '100%';
+                    textElement.textContent = 'Refreshing data...';
+                    refreshData();
+                } else {
+                    // Update progress bar and text
+                    fillElement.style.width = `${progress}%`;
+                    textElement.textContent = `Next refresh in ${remainingSeconds}s...`;
+                }
+            }, 100); // Update every 100ms for smooth animation
+        }
+        
+        function showRefreshProgress(progress, text = 'Refreshing data...') {
+            const fillElement = document.getElementById('loading-bar-fill');
+            const textElement = document.getElementById('loading-bar-text');
+            
+            fillElement.style.width = `${Math.min(100, Math.max(0, progress))}%`;
+            textElement.textContent = text;
+        }
+
+        // Show error notification (only errors are shown now)
+        function showNotification(message, type = 'error', title = null) {
+            // Only show error notifications
+            if (type !== 'error' && type !== 'warning') {
+                return;
+            }
+            
+            const container = document.getElementById('notification-container');
+            
+            // Create notification element
+            const notification = document.createElement('div');
+            notification.className = 'notification';
+            
+            // Get appropriate icon and title based on type
+            let icon, defaultTitle;
+            if (type === 'warning') {
+                icon = '⚠️';
+                defaultTitle = 'Warning';
+            } else {
+                icon = '❌';
+                defaultTitle = 'Error';
+            }
+            
+            notification.innerHTML = `
+                <div class="notification-header">
+                    <div style="display: flex; align-items: center;">
+                        <span class="notification-icon">${icon}</span>
+                        <span class="notification-title">${title || defaultTitle}</span>
+                    </div>
+                    <button class="notification-close" onclick="closeNotification(this)">×</button>
+                </div>
+                <div class="notification-message">${message}</div>
+                <div class="notification-progress"></div>
+            `;
+            
+            // Add to container
+            container.appendChild(notification);
+            
+            // Auto-remove after 5 seconds
+            setTimeout(() => {
+                removeNotification(notification);
+            }, 5000);
+            
+            // Limit to 5 notifications max
+            const notifications = container.children;
+            if (notifications.length > 5) {
+                removeNotification(notifications[0]);
+            }
+        }
+        
+        // Close notification manually
+        function closeNotification(button) {
+            const notification = button.closest('.notification');
+            removeNotification(notification);
+        }
+        
+        // Remove notification with animation
+        function removeNotification(notification) {
+            if (notification && !notification.classList.contains('removing')) {
+                notification.classList.add('removing');
+                setTimeout(() => {
+                    if (notification.parentNode) {
+                        notification.parentNode.removeChild(notification);
+                    }
+                }, 300);
+            }
+        }
+        
+        // Legacy function for compatibility
+        function showStatus(message, type = 'info') {
+            showNotification(message, type);
+        }
+        
+        // Legacy loading bar functions for compatibility (now use countdown system)
+        function showLoadingBar(text = 'Loading...') {
+            showRefreshProgress(0, text);
+        }
+        
+        function updateLoadingBar(progress, text = 'Loading...') {
+            showRefreshProgress(progress, text);
+        }
+        
+        function hideLoadingBar() {
+            // Loading bar is always visible, so we don't hide it
+            // Just ensure countdown restarts if not already running
+            if (!isRefreshing && !countdownTimer) {
+                startCountdownTimer();
+            }
+        }
+
+        // Format number with appropriate decimal places
+        function formatNumber(value, decimals = 2) {
+            if (value === null || value === undefined) return '-';
+            return Number(value).toFixed(decimals);
+        }
+
+        // Get status class for surplus/deficit
+        function getStatusClass(status) {
+            if (!status) return 'no-data';
+            switch (status.toLowerCase()) {
+                case 'surplus': return 'surplus';
+                case 'deficit': return 'deficit';
+                case 'balanced': return 'balanced';
+                default: return 'no-data';
+            }
+        }
+
+        // Pagination functions
+        function updatePaginationInfo() {
+            const infoElement = document.getElementById('pagination-info');
+            if (paginationData) {
+                const { current_page, per_page, total_pages, start_interval, end_interval } = paginationData;
+                if (per_page === -1) {
+                    infoElement.textContent = `Showing all ${totalIntervals} intervals`;
+                } else {
+                    infoElement.textContent = `Page ${current_page} of ${total_pages} (intervals ${start_interval}-${end_interval} of ${totalIntervals})`;
+                }
+            } else {
+                infoElement.textContent = 'Loading...';
+            }
+        }
+
+        function updatePaginationControls() {
+            if (!paginationData) return;
+            
+            const { current_page, total_pages, has_previous, has_next } = paginationData;
+            
+            // Update navigation buttons
+            document.getElementById('prev-btn').disabled = !has_previous;
+            document.getElementById('next-btn').disabled = !has_next;
+            
+            // Update page numbers
+            const pageNumbersContainer = document.getElementById('page-numbers');
+            pageNumbersContainer.innerHTML = '';
+            
+            if (total_pages <= 1) return;
+            
+            // Generate page numbers with ellipsis
+            const maxVisiblePages = 7;
+            let startPage = Math.max(1, current_page - Math.floor(maxVisiblePages / 2));
+            let endPage = Math.min(total_pages, startPage + maxVisiblePages - 1);
+            
+            // Adjust start if we're near the end
+            if (endPage - startPage < maxVisiblePages - 1) {
+                startPage = Math.max(1, endPage - maxVisiblePages + 1);
+            }
+            
+            // Add first page and ellipsis if needed
+            if (startPage > 1) {
+                addPageNumber(1, current_page);
+                if (startPage > 2) {
+                    addEllipsis();
+                }
+            }
+            
+            // Add visible page numbers
+            for (let i = startPage; i <= endPage; i++) {
+                addPageNumber(i, current_page);
+            }
+            
+            // Add ellipsis and last page if needed
+            if (endPage < total_pages) {
+                if (endPage < total_pages - 1) {
+                    addEllipsis();
+                }
+                addPageNumber(total_pages, current_page);
+            }
+        }
+
+        function addPageNumber(pageNum, currentPage) {
+            const pageNumbersContainer = document.getElementById('page-numbers');
+            const pageElement = document.createElement('div');
+            pageElement.className = `page-number ${pageNum === currentPage ? 'active' : ''}`;
+            pageElement.textContent = pageNum;
+            pageElement.onclick = () => goToPage(pageNum);
+            pageNumbersContainer.appendChild(pageElement);
+        }
+
+        function addEllipsis() {
+            const pageNumbersContainer = document.getElementById('page-numbers');
+            const ellipsis = document.createElement('div');
+            ellipsis.className = 'page-number ellipsis';
+            ellipsis.textContent = '...';
+            pageNumbersContainer.appendChild(ellipsis);
+        }
+
+        async function goToPage(page) {
+            if (page === currentPage || page < 1 || page > totalPages) return;
+            
+            currentPage = page;
+            await loadPaginatedData();
+        }
+
+        async function previousPage() {
+            if (currentPage > 1) {
+                await goToPage(currentPage - 1);
+            }
+        }
+
+        async function nextPage() {
+            if (currentPage < totalPages) {
+                await goToPage(currentPage + 1);
+            }
+        }
+
+        async function changePerPage() {
+            const select = document.getElementById('per-page-select');
+            perPage = parseInt(select.value);
+            currentPage = 1; // Reset to first page
+            await loadPaginatedData();
+        }
+
+        async function jumpToCurrent() {
+            if (!currentIntervalNumber) return;
+            
+            // Since we always show all 96 intervals, just scroll to current interval
+            scrollToCurrentInterval();
+        }
+
+        function scrollToCurrentInterval() {
+            // Find current interval rows in both tables
+            const actualCurrentRow = document.querySelector('#actual-data-table .current-interval');
+            const powerCurrentRow = document.querySelector('#power-generation-table .current-interval');
+            
+            if (actualCurrentRow) {
+                actualCurrentRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else if (powerCurrentRow) {
+                powerCurrentRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+
+        async function loadPaginatedData() {
+            try {
+                // Set refreshing flag to pause countdown
+                isRefreshing = true;
+                
+                // Show refresh progress
+                showRefreshProgress(10, 'Loading paginated data...');
+                
+                // Load both tables with pagination
+                const [actualData, powerData] = await Promise.all([
+                    loadActualDataPaginated(),
+                    loadPowerGenerationDataPaginated()
+                ]);
+                
+                // Update pagination info from the first response (both should be the same)
+                paginationData = actualData.pagination;
+                totalIntervals = actualData.total_intervals;
+                currentIntervalNumber = actualData.current_interval;
+                
+                // Update pagination controls
+                updatePaginationInfo();
+                updatePaginationControls();
+                
+                showRefreshProgress(100, 'Pagination complete!');
+                
+                // Reset refreshing flag and restart countdown
+                setTimeout(() => {
+                    isRefreshing = false;
+                    startCountdownTimer();
+                }, 500);
+                
+            } catch (error) {
+                console.error('Error during paginated refresh:', error);
+                isRefreshing = false;
+                showNotification('Failed to load paginated data', 'error');
+                startCountdownTimer();
+            }
+        }
+
+        async function loadActualDataPaginated() {
+            try {
+                const response = await axios.get(`/api/daily-intervals?page=${currentPage}&per_page=${perPage}`);
+                const data = response.data;
+                
+                const tableBody = document.getElementById('actual-data-table');
+                tableBody.innerHTML = '';
+                
+                data.intervals.forEach(interval => {
+                    const row = document.createElement('tr');
+                    
+                    // Add appropriate classes for highlighting
+                    if (interval.is_current) {
+                        row.classList.add('current-interval');
+                    }
+                    
+                    // Add positive/negative price color coding
+                    if (interval.price !== null && interval.price !== undefined) {
+                        if (interval.price >= 0) {
+                            row.classList.add('positive-price');
+                        } else {
+                            row.classList.add('negative-price');
+                        }
+                    }
+                    
+                    // Extract only time portion from interval.time (remove date)
+                    const timeOnly = interval.time.includes(' ') ? interval.time.split(' ')[1] : interval.time;
+                    
+                    row.innerHTML = `
+                        <td>${timeOnly}</td>
+                        <td>${(interval.price !== null && interval.price !== undefined) ? formatNumber(interval.price) : '<span class="no-data">No data</span>'}</td>
+                        <td>${(interval.volume !== null && interval.volume !== undefined) ? formatNumber(interval.volume) : '<span class="no-data">No data</span>'}</td>
+                        <td><span class="${getStatusClass(interval.surplus_deficit)}">${interval.surplus_deficit || 'No data'}</span></td>
+                    `;
+                    
+                    tableBody.appendChild(row);
+                });
+                
+                // Update data freshness indicator
+                const today = new Date().toISOString().split('T')[0];
+                const dataDate = data.date;
+                const freshnessDiv = document.getElementById('data-freshness');
+                
+                if (dataDate === today) {
+                    freshnessDiv.innerHTML = '🟢 <strong>Today\'s Data</strong> - Real-time updates';
+                    freshnessDiv.style.color = '#28a745';
+                } else {
+                    const daysDiff = Math.floor((new Date(today) - new Date(dataDate)) / (1000 * 60 * 60 * 24));
+                    if (daysDiff === 1) {
+                        freshnessDiv.innerHTML = '🟡 <strong>Yesterday\'s Data</strong> - Latest available';
+                        freshnessDiv.style.color = '#ffc107';
+                    } else {
+                        freshnessDiv.innerHTML = `🔴 <strong>${daysDiff} days old</strong> - Historical data`;
+                        freshnessDiv.style.color = '#dc3545';
+                    }
+                }
+                
+                return data;
+                
+            } catch (error) {
+                console.error('Error loading paginated actual data:', error);
+                showStatus('Failed to load actual data', 'error');
+                
+                const tableBody = document.getElementById('actual-data-table');
+                tableBody.innerHTML = '<tr><td colspan="4" class="no-data">Failed to load data</td></tr>';
+                throw error;
+            }
+        }
+
+        async function loadPowerGenerationDataPaginated() {
+            try {
+                const cacheBuster = Date.now();
+                const response = await axios.get(`/api/power-generation-intervals?page=${currentPage}&per_page=${perPage}&_t=${cacheBuster}`);
+                const data = response.data;
+                
+                const tableBody = document.getElementById('power-generation-table');
+                tableBody.innerHTML = '';
+                
+                data.intervals.forEach(interval => {
+                    const row = document.createElement('tr');
+                    
+                    // Add appropriate classes for highlighting
+                    if (interval.is_current) {
+                        row.classList.add('current-interval');
+                    }
+                    
+                    // Add status-based row coloring
+                    if (interval.status) {
+                        switch (interval.status.toLowerCase()) {
+                            case 'surplus':
+                                row.classList.add('positive-price'); // Green background
+                                break;
+                            case 'deficit':
+                                row.classList.add('negative-price'); // Red background
+                                break;
+                            case 'balanced':
+                                // No special background color for balanced
+                                break;
+                        }
+                    }
+                    
+                    // Extract only time portion from interval.time (remove date)
+                    const timeOnly = interval.time.includes(' ') ? interval.time.split(' ')[1] : interval.time;
+                    
+                    // Format values with proper handling of null/undefined
+                    const production = (interval.production !== null && interval.production !== undefined) ? formatNumber(interval.production, 0) : '<span class="no-data">-</span>';
+                    const consumption = (interval.consumption !== null && interval.consumption !== undefined) ? formatNumber(interval.consumption, 0) : '<span class="no-data">-</span>';
+                    const imports = (interval.imports !== null && interval.imports !== undefined) ? formatNumber(interval.imports, 0) : '<span class="no-data">-</span>';
+                    const exports = (interval.exports !== null && interval.exports !== undefined) ? formatNumber(interval.exports, 0) : '<span class="no-data">-</span>';
+                    const netBalance = (interval.net_balance !== null && interval.net_balance !== undefined) ? formatNumber(interval.net_balance, 0) : '<span class="no-data">-</span>';
+                    
+                    // Calculate formula: Production + Imports - Consumption - Exports
+                    let formulaResult = '<span class="no-data">-</span>';
+                    if (interval.production !== null && interval.production !== undefined &&
+                        interval.consumption !== null && interval.consumption !== undefined &&
+                        interval.imports !== null && interval.imports !== undefined &&
+                        interval.exports !== null && interval.exports !== undefined) {
+                        const calculated = interval.production + interval.imports - interval.consumption - interval.exports;
+                        formulaResult = formatNumber(calculated, 0);
+                    }
+                    
+                    row.innerHTML = `
+                        <td>${timeOnly}</td>
+                        <td>${production}</td>
+                        <td>${consumption}</td>
+                        <td>${imports}</td>
+                        <td>${exports}</td>
+                        <td>${netBalance}</td>
+                        <td>${formulaResult}</td>
+                    `;
+                    
+                    tableBody.appendChild(row);
+                });
+                
+                // Update power data freshness indicator
+                const today = new Date().toISOString().split('T')[0];
+                const dataDate = data.date;
+                const freshnessDiv = document.getElementById('power-data-freshness');
+                
+                if (dataDate === today) {
+                    freshnessDiv.innerHTML = '🟢 <strong>Real-time Data</strong> - Live power system status';
+                    freshnessDiv.style.color = '#28a745';
+                } else {
+                    const daysDiff = Math.floor((new Date(today) - new Date(dataDate)) / (1000 * 60 * 60 * 24));
+                    if (daysDiff === 1) {
+                        freshnessDiv.innerHTML = '🟡 <strong>Yesterday\'s Data</strong> - Latest available';
+                        freshnessDiv.style.color = '#ffc107';
+                    } else {
+                        freshnessDiv.innerHTML = `🔴 <strong>${daysDiff} days old</strong> - Historical data`;
+                        freshnessDiv.style.color = '#dc3545';
+                    }
+                }
+                
+                return data;
+                
+            } catch (error) {
+                console.error('Error loading paginated power generation data:', error);
+                showStatus('Failed to load power generation data', 'error');
+                
+                const tableBody = document.getElementById('power-generation-table');
+                tableBody.innerHTML = '<tr><td colspan="7" class="no-data">Failed to load power generation data</td></tr>';
+                throw error;
+            }
+        }
+
+        // Load actual interval data (legacy function for backward compatibility)
+        async function loadActualData(targetDate = null) {
+            try {
+                let url = '/api/daily-intervals';
+                if (targetDate) {
+                    url += `?target_date=${targetDate}`;
+                }
+                const response = await axios.get(url);
+                const data = response.data;
+                
+                const tableBody = document.getElementById('actual-data-table');
+                tableBody.innerHTML = '';
+                
+                currentInterval = data.current_interval;
+                
+                data.intervals.forEach(interval => {
+                    const row = document.createElement('tr');
+                    
+                    // Add appropriate classes for highlighting
+                    if (interval.is_current) {
+                        row.classList.add('current-interval');
+                    }
+                    
+                    // Add positive/negative price color coding
+                    if (interval.price !== null && interval.price !== undefined) {
+                        if (interval.price >= 0) {
+                            row.classList.add('positive-price');
+                        } else {
+                            row.classList.add('negative-price');
+                        }
+                    }
+                    
+                    // Extract only time portion from interval.time (remove date)
+                    const timeOnly = interval.time.includes(' ') ? interval.time.split(' ')[1] : interval.time;
+                    
+                    row.innerHTML = `
+                        <td>${timeOnly}</td>
+                        <td>${(interval.price !== null && interval.price !== undefined) ? formatNumber(interval.price) : '<span class="no-data">No data</span>'}</td>
+                        <td>${(interval.volume !== null && interval.volume !== undefined) ? formatNumber(interval.volume) : '<span class="no-data">No data</span>'}</td>
+                        <td><span class="${getStatusClass(interval.surplus_deficit)}">${interval.surplus_deficit || 'No data'}</span></td>
+                    `;
+                    
+                    tableBody.appendChild(row);
+                });
+                
+                // Scroll to current interval
+                if (currentInterval) {
+                    const currentRow = tableBody.children[currentInterval - 1];
+                    if (currentRow) {
+                        currentRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                }
+                
+                // Update data freshness indicator
+                const today = new Date().toISOString().split('T')[0];
+                const dataDate = data.date;
+                const freshnessDiv = document.getElementById('data-freshness');
+                
+                if (dataDate === today) {
+                    freshnessDiv.innerHTML = '🟢 <strong>Today\'s Data</strong> - Real-time updates';
+                    freshnessDiv.style.color = '#28a745';
+                } else {
+                    const daysDiff = Math.floor((new Date(today) - new Date(dataDate)) / (1000 * 60 * 60 * 24));
+                    if (daysDiff === 1) {
+                        freshnessDiv.innerHTML = '🟡 <strong>Yesterday\'s Data</strong> - Latest available';
+                        freshnessDiv.style.color = '#ffc107';
+                    } else {
+                        freshnessDiv.innerHTML = `🔴 <strong>${daysDiff} days old</strong> - Historical data`;
+                        freshnessDiv.style.color = '#dc3545';
+                    }
+                }
+                
+                return data; // Return data for consolidated message
+                
+            } catch (error) {
+                console.error('Error loading actual data:', error);
+                showStatus('Failed to load actual data', 'error');
+                
+                const tableBody = document.getElementById('actual-data-table');
+                tableBody.innerHTML = '<tr><td colspan="4" class="no-data">Failed to load data</td></tr>';
+                throw error; // Re-throw to handle in refreshData
+            }
+        }
+
+        // Load power generation interval data
+        async function loadPowerGenerationData(targetDate = null) {
+            try {
+                // Add cache-busting parameter to ensure fresh data
+                const cacheBuster = Date.now();
+                let url = `/api/power-generation-intervals?_t=${cacheBuster}`;
+                if (targetDate) {
+                    url += `&target_date=${targetDate}`;
+                }
+                const response = await axios.get(url);
+                const data = response.data;
+                
+                const tableBody = document.getElementById('power-generation-table');
+                tableBody.innerHTML = '';
+                
+                currentInterval = data.current_interval;
+                
+                data.intervals.forEach(interval => {
+                    const row = document.createElement('tr');
+                    
+                    // Add appropriate classes for highlighting
+                    if (interval.is_current) {
+                        row.classList.add('current-interval');
+                    }
+                    
+                    // Add status-based row coloring
+                    if (interval.status) {
+                        switch (interval.status.toLowerCase()) {
+                            case 'surplus':
+                                row.classList.add('positive-price'); // Green background
+                                break;
+                            case 'deficit':
+                                row.classList.add('negative-price'); // Red background
+                                break;
+                            case 'balanced':
+                                // No special background color for balanced
+                                break;
+                        }
+                    }
+                    
+                    // Extract only time portion from interval.time (remove date)
+                    const timeOnly = interval.time.includes(' ') ? interval.time.split(' ')[1] : interval.time;
+                    
+                    // Format values with proper handling of null/undefined
+                    const production = (interval.production !== null && interval.production !== undefined) ? formatNumber(interval.production, 0) : '<span class="no-data">-</span>';
+                    const consumption = (interval.consumption !== null && interval.consumption !== undefined) ? formatNumber(interval.consumption, 0) : '<span class="no-data">-</span>';
+                    const imports = (interval.imports !== null && interval.imports !== undefined) ? formatNumber(interval.imports, 0) : '<span class="no-data">-</span>';
+                    const exports = (interval.exports !== null && interval.exports !== undefined) ? formatNumber(interval.exports, 0) : '<span class="no-data">-</span>';
+                    const netBalance = (interval.net_balance !== null && interval.net_balance !== undefined) ? formatNumber(interval.net_balance, 0) : '<span class="no-data">-</span>';
+                    
+                    // Calculate formula: Production + Imports - Consumption - Exports
+                    let formulaResult = '<span class="no-data">-</span>';
+                    if (interval.production !== null && interval.production !== undefined &&
+                        interval.consumption !== null && interval.consumption !== undefined &&
+                        interval.imports !== null && interval.imports !== undefined &&
+                        interval.exports !== null && interval.exports !== undefined) {
+                        const calculated = interval.production + interval.imports - interval.consumption - interval.exports;
+                        formulaResult = formatNumber(calculated, 0);
+                    }
+                    
+                    row.innerHTML = `
+                        <td>${timeOnly}</td>
+                        <td>${production}</td>
+                        <td>${consumption}</td>
+                        <td>${imports}</td>
+                        <td>${exports}</td>
+                        <td>${netBalance}</td>
+                        <td>${formulaResult}</td>
+                    `;
+                    
+                    tableBody.appendChild(row);
+                });
+                
+                // Scroll to current interval
+                if (currentInterval) {
+                    const currentRow = tableBody.children[currentInterval - 1];
+                    if (currentRow) {
+                        currentRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                }
+                
+                // Update power data freshness indicator
+                const today = new Date().toISOString().split('T')[0];
+                const dataDate = data.date;
+                const freshnessDiv = document.getElementById('power-data-freshness');
+                
+                if (dataDate === today) {
+                    freshnessDiv.innerHTML = '🟢 <strong>Real-time Data</strong> - Live power system status';
+                    freshnessDiv.style.color = '#28a745';
+                } else {
+                    const daysDiff = Math.floor((new Date(today) - new Date(dataDate)) / (1000 * 60 * 60 * 24));
+                    if (daysDiff === 1) {
+                        freshnessDiv.innerHTML = '🟡 <strong>Yesterday\'s Data</strong> - Latest available';
+                        freshnessDiv.style.color = '#ffc107';
+                    } else {
+                        freshnessDiv.innerHTML = `🔴 <strong>${daysDiff} days old</strong> - Historical data`;
+                        freshnessDiv.style.color = '#dc3545';
+                    }
+                }
+                
+                return data; // Return data for consolidated message
+                
+            } catch (error) {
+                console.error('Error loading power generation data:', error);
+                showStatus('Failed to load power generation data', 'error');
+                
+                const tableBody = document.getElementById('power-generation-table');
+                tableBody.innerHTML = '<tr><td colspan="7" class="no-data">Failed to load power generation data</td></tr>';
+                throw error; // Re-throw to handle in refreshData
+            }
+        }
+
+
+        // Refresh all data (now loads all 96 intervals)
+        async function refreshData() {
+            try {
+                // Set refreshing flag to pause countdown
+                isRefreshing = true;
+                
+                // Clear any existing timer
+                if (countdownTimer) {
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                }
+                
+                // Show refresh progress
+                showRefreshProgress(10, 'Loading data...');
+                
+                // Load both tables
+                const [actualData, powerData] = await Promise.all([
+                    loadActualData(),
+                    loadPowerGenerationData()
+                ]);
+                
+                // Update current interval info
+                currentIntervalNumber = actualData.current_interval;
+                
+                showRefreshProgress(100, 'Data loaded successfully!');
+                
+                // Reset refreshing flag and restart countdown
+                setTimeout(() => {
+                    isRefreshing = false;
+                    startCountdownTimer();
+                }, 1000);
+                
+            } catch (error) {
+                console.error('Error during refresh:', error);
+                isRefreshing = false;
+                showNotification('Failed to load data', 'error');
+                
+                // Always restart countdown even on error
+                setTimeout(() => {
+                    startCountdownTimer();
+                }, 2000);
+            }
+        }
+
+        // Collect new data
+        async function collectData() {
+            try {
+                // Pause countdown during collection
+                isRefreshing = true;
+                if (countdownTimer) {
+                    clearInterval(countdownTimer);
+                }
+                
+                showRefreshProgress(25, 'Starting data collection...');
+                
+                const response = await axios.post('/api/collect-data');
+                showRefreshProgress(75, 'Collection started successfully...');
+                
+                showRefreshProgress(100, 'Collection initiated!');
+                
+                // Restart countdown after collection
+                setTimeout(() => {
+                    isRefreshing = false;
+                    startCountdownTimer();
+                }, 1000);
+                
+                // Refresh data after a delay
+                setTimeout(refreshData, 5000);
+            } catch (error) {
+                console.error('Error collecting data:', error);
+                isRefreshing = false;
+                showNotification('Failed to start data collection', 'error');
+                startCountdownTimer(); // Restart countdown even on error
+            }
+        }
+
+        // Test API connection
+        async function testConnection() {
+            try {
+                // Pause countdown during connection test
+                const wasRefreshing = isRefreshing;
+                isRefreshing = true;
+                
+                showRefreshProgress(50, 'Testing API connection...');
+                
+                const response = await axios.get('/api/connection-test');
+                showRefreshProgress(100, 'Connection test complete!');
+                
+                // Restore refreshing state
+                setTimeout(() => {
+                    isRefreshing = wasRefreshing;
+                    if (!wasRefreshing && !countdownTimer) {
+                        startCountdownTimer();
+                    }
+                }, 500);
+                
+                if (!response.data.connected) {
+                    showNotification(response.data.message, 'warning', 'Connection Warning');
+                }
+            } catch (error) {
+                console.error('Error testing connection:', error);
+                isRefreshing = false;
+                showNotification('Connection test failed', 'error');
+                if (!countdownTimer) {
+                    startCountdownTimer();
+                }
+            }
+        }
+
+        // Synchronized scrolling functionality
+        function setupSynchronizedScrolling() {
+            const actualTableWrapper = document.getElementById('actual-table-wrapper');
+            const powerTableWrapper = document.getElementById('power-table-wrapper');
+            
+            let isScrolling = false; // Flag to prevent infinite scroll loops
+            
+            // Synchronize scroll from actual table to power table
+            actualTableWrapper.addEventListener('scroll', function() {
+                if (!isScrolling) {
+                    isScrolling = true;
+                    powerTableWrapper.scrollTop = this.scrollTop;
+                    setTimeout(() => { isScrolling = false; }, 10);
+                }
+            });
+            
+            // Synchronize scroll from power table to actual table
+            powerTableWrapper.addEventListener('scroll', function() {
+                if (!isScrolling) {
+                    isScrolling = true;
+                    actualTableWrapper.scrollTop = this.scrollTop;
+                    setTimeout(() => { isScrolling = false; }, 10);
+                }
+            });
+        }
+
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            // Update time every second
+            updateCurrentTime();
+            setInterval(updateCurrentTime, 1000);
+            
+            // Load initial data
+            refreshData().then(() => {
+                // Setup synchronized scrolling after data is loaded
+                setupSynchronizedScrolling();
+            });
+            testConnection();
+            
+            // Start the countdown timer for auto-refresh
+            startCountdownTimer();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+# ENTSO-E API Configuration
+api:
+  base_url: "https://web-api.tp.entsoe.eu/api"
+  token: "fe931761-163e-44ef-b106-854ad60e26ef"
+  username: "catalin.stancel@yellowgrid.ro"
+  rate_limit: 400  # requests per minute
+  timeout: 30  # seconds
+
+# Romanian market configuration
+market:
+  domain: "10YRO-TEL------P"  # Romania EIC code
+  country: "Romania"
+  timezone: "Europe/Bucharest"
+  currency: "EUR"
+
+# Document types for imbalance data
+document_types:
+  imbalance_prices: "A85"
+  imbalance_volumes: "A86"
+
+# Imbalance price categories
+price_categories:
+  excess_balance: "A04"
+  insufficient_balance: "A05"
+  average_bid_price: "A06"
+  single_marginal_bid_price: "A07"
+  cross_border_marginal_price: "A08"
+
+# Database configuration
+database:
+  type: "sqlite"
+  path: "data/balancing_market.db"
+  backup_enabled: true
+  backup_interval_hours: 24
+
+# Data collection settings
+data_collection:
+  default_period_days: 7
+  max_period_days: 365
+  collection_interval_minutes: 15
+  retry_attempts: 3
+  retry_delay_seconds: 5
+
+# Analysis settings
+analysis:
+  forecasting_horizon_hours: 24
+  confidence_intervals: [0.8, 0.95]
+  seasonal_periods: [24, 168, 8760]  # hourly, weekly, yearly
+  moving_average_windows: [7, 30, 90]
+
+# Web application settings
+web:
+  host: "0.0.0.0"
+  port: 8000
+  debug: true
+  auto_reload: true
+  title: "Romanian Energy Balancing Market Analysis"
+  description: "Real-time analysis and forecasting of Romanian energy imbalance pricing"
+
+# Logging configuration
+logging:
+  level: "DEBUG"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/balancing_market.log"
+  max_file_size_mb: 10
+  backup_count: 5

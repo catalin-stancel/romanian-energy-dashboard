@@ -1,0 +1,69 @@
+# Production Configuration for Romanian Energy Balancing Market Dashboard
+# This configuration is used when deployed to Render.com
+
+# ENTSO-E API Configuration
+api:
+  base_url: "https://web-api.tp.entsoe.eu/api"
+  token: "${ENTSOE_API_TOKEN}"  # Will be set via environment variable
+  username: "catalin.stancel@yellowgrid.ro"
+  rate_limit: 400  # requests per minute
+  timeout: 30  # seconds
+
+# Romanian market configuration
+market:
+  domain: "10YRO-TEL------P"  # Romania EIC code
+  country: "Romania"
+  timezone: "Europe/Bucharest"
+  currency: "EUR"
+
+# Document types for imbalance data
+document_types:
+  imbalance_prices: "A85"
+  imbalance_volumes: "A86"
+
+# Imbalance price categories
+price_categories:
+  excess_balance: "A04"
+  insufficient_balance: "A05"
+  average_bid_price: "A06"
+  single_marginal_bid_price: "A07"
+  cross_border_marginal_price: "A08"
+
+# Database configuration - PostgreSQL for production
+database:
+  type: "postgresql"
+  url: "${DATABASE_URL}"  # Will be provided by Render.com
+  backup_enabled: true
+  backup_interval_hours: 24
+
+# Data collection settings
+data_collection:
+  default_period_days: 7
+  max_period_days: 365
+  collection_interval_minutes: 15
+  retry_attempts: 3
+  retry_delay_seconds: 5
+
+# Analysis settings
+analysis:
+  forecasting_horizon_hours: 24
+  confidence_intervals: [0.8, 0.95]
+  seasonal_periods: [24, 168, 8760]  # hourly, weekly, yearly
+  moving_average_windows: [7, 30, 90]
+
+# Web application settings
+web:
+  host: "0.0.0.0"
+  port: "${PORT}"  # Will be set by Render.com
+  debug: false
+  auto_reload: false
+  title: "Romanian Energy Balancing Market Analysis"
+  description: "Real-time analysis and forecasting of Romanian energy imbalance pricing"
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null  # Use stdout in production
+  max_file_size_mb: 10
+  backup_count: 5
