@@ -381,7 +381,8 @@ async def get_daily_intervals(target_date: Optional[str] = None) -> Dict[str, An
                         volume_value = volume_record.value
                         surplus_deficit = "Surplus" if volume_record.value > 0 else "Deficit" if volume_record.value < 0 else "Balanced"
                 
-                # Convert times for comparison (database times are timezone-naive)
+                # Fix timezone comparison - ensure both times are in the same timezone
+                # Convert current_time to naive Romanian time for comparison with database times
                 current_time_naive = current_time.replace(tzinfo=None)
                 
                 # Determine if this interval is current, past, or future
@@ -616,9 +617,10 @@ async def get_power_generation_intervals(target_date: Optional[str] = None) -> J
                 "message": "No power generation data available"
             }
         
-        # Get historical interval data for today
-        current_time = datetime.now()
-        start_date = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Get historical interval data for today using Romanian time
+        current_time = get_romanian_time()
+        current_time_naive = current_time.replace(tzinfo=None)
+        start_date = current_time_naive.replace(hour=0, minute=0, second=0, microsecond=0)
         end_date = start_date + timedelta(days=1)
         
         # Get historical data from database
@@ -632,8 +634,8 @@ async def get_power_generation_intervals(target_date: Optional[str] = None) -> J
             interval_start = start_date + timedelta(minutes=i * 15)
             interval_end = interval_start + timedelta(minutes=15)
             
-            # Determine if this interval is current
-            is_current = interval_start <= current_time < interval_end
+            # Determine if this interval is current using Romanian time
+            is_current = interval_start <= current_time_naive < interval_end
             if is_current:
                 current_interval_num = i + 1
             
