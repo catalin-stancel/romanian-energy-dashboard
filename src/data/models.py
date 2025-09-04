@@ -285,19 +285,25 @@ def create_database_engine():
         engine = create_engine(f"sqlite:///{db_config['path']}", echo=False)
     elif db_config['type'] == 'postgresql':
         # Use PostgreSQL connection URL from environment
-        database_url = db_config['url']
-        if not database_url:
-            raise ValueError("DATABASE_URL environment variable is required for PostgreSQL")
+        database_url = db_config.get('url') or os.getenv('DATABASE_URL')
         
-        # Create engine with connection pooling for production
-        engine = create_engine(
-            database_url,
-            echo=False,
-            pool_size=10,
-            max_overflow=20,
-            pool_pre_ping=True,
-            pool_recycle=300
-        )
+        # Handle case where DATABASE_URL is not set or is placeholder
+        if not database_url or database_url == '${DATABASE_URL}':
+            # Fallback to SQLite for development/testing
+            print("Warning: DATABASE_URL not found, falling back to SQLite")
+            db_path = Path("data/balancing_market.db")
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            engine = create_engine(f"sqlite:///{db_path}", echo=False)
+        else:
+            # Create engine with connection pooling for production
+            engine = create_engine(
+                database_url,
+                echo=False,
+                pool_size=10,
+                max_overflow=20,
+                pool_pre_ping=True,
+                pool_recycle=300
+            )
     else:
         raise ValueError(f"Unsupported database type: {db_config['type']}")
     
