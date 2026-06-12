@@ -824,17 +824,26 @@ function widgetData() {
   const cfg = loadConfig();
   const today = roDateIsp(new Date()).date;
   const userBets = new Map(db.prepare('SELECT isp, qty FROM user_bets WHERE date_ro=?').all(today).map((r) => [r.isp, r.qty]));
-  let pnl = 0, settled = 0, lastIsp = null, lastPrice = null, lastImb = null;
+  let pnl = 0, settled = 0;
+  const intervals = [];
   for (const { isp, ts } of dayTimestamps(today)) {
     const imbPrice = sv('damas_est_price_pos', ts);
     const imb = sv('damas_est_sys_imbalance', ts);
-    if (imbPrice !== null) { lastIsp = isp; lastPrice = imbPrice; lastImb = imb; }
+    if (imbPrice !== null && imb !== null) {
+      intervals.push({
+        cet: cetLabel(isp).replace(/<[^>]+>/g, ''),
+        dir: imb > 0 ? 'S' : 'D',
+        qty: Math.round(Math.abs(imb)),
+        price: Math.round(imbPrice),
+      });
+    }
     const qty = userBets.get(isp);
     if (qty && imbPrice !== null) {
       const pzu = sv('pzu_ron', ts) ?? (sv('da_price', ts) !== null ? sv('da_price', ts) * cfg.eur_ron : null);
       if (pzu !== null) { pnl += qty * (imbPrice - pzu); settled++; }
     }
   }
+  const last3 = intervals.slice(-3).reverse(); // newest first
   const acc = db.prepare(`
     SELECT COUNT(*) n, SUM(CASE WHEN (p.prob_long>0.5)=(p.realized_imb>0) THEN 1 ELSE 0 END) h
     FROM predictions p
@@ -844,9 +853,9 @@ function widgetData() {
   return {
     date: today, pnl: Math.round(pnl), settled,
     acc: acc.n ? Math.round(acc.h / acc.n * 100) : null,
-    lastIsp, lastCet: lastIsp ? cetLabel(lastIsp).replace(/<[^>]+>/g, '') : null,
-    lastPrice: lastPrice !== null ? Math.round(lastPrice) : null,
-    lastDir: lastImb !== null ? (lastImb > 0 ? 'S' : 'D') : null,
+    last3, // newest first: [{cet, dir, qty, price}, ...]
+    // kept for older widget scripts:
+    lastCet: last3[0]?.cet ?? null, lastPrice: last3[0]?.price ?? null, lastDir: last3[0]?.dir ?? null,
     ts: new Date().toISOString(),
   };
 }

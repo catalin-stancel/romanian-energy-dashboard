@@ -1,54 +1,48 @@
 // GAN Trading — iPhone widget (Scriptable app, https://scriptable.app)
-// Shows today's P&L, prediction accuracy and the latest settled interval.
+// Today's P&L + the last three settled intervals (direction, quantity MWh, price RON/MWh).
 // Works as: lock screen (rectangular accessory) and home screen (small/medium) widget.
-//
-// Setup: install Scriptable → new script → paste this → set URL below →
-//  Home screen: long-press → add widget → Scriptable → pick this script
-//  Lock screen: customize lock screen → add widget → Scriptable → pick this script
 const URL_ = 'https://gan-trading.onrender.com/api/widget?key=PASTE_KEY_HERE';
 
 const d = await new Request(URL_).loadJSON();
 const pnlTxt = (d.pnl >= 0 ? '+' : '') + d.pnl.toLocaleString('en-US') + ' RON';
 const GREEN = new Color('#1F9E57'), RED = new Color('#D93A30'),
   YELLOW = new Color('#FFF500'), BLACK = new Color('#121212'), GRAY = new Color('#9b9b9b');
+const rows = d.last3 || [];
+const line = (r) => `${r.cet}  ${r.dir} ${r.qty} MWh  ${r.price} RON`;
 
 const w = new ListWidget();
 
 if (config.widgetFamily && config.widgetFamily.startsWith('accessory')) {
-  // lock screen — compact
-  w.addSpacer(2);
-  const t1 = w.addText(pnlTxt);
-  t1.font = Font.boldSystemFont(16);
-  const t2 = w.addText(
-    (d.lastCet ? `${d.lastCet} ${d.lastDir ?? ''} ${d.lastPrice ?? ''}` : 'no data') +
-    (d.acc !== null ? ` · acc ${d.acc}%` : ''),
-  );
-  t2.font = Font.systemFont(11);
+  // lock screen — P&L + three compact interval rows
+  const t1 = w.addText(pnlTxt + (d.acc !== null ? `  ·  acc ${d.acc}%` : ''));
+  t1.font = Font.boldSystemFont(12);
+  for (const r of rows) {
+    const t = w.addText(line(r));
+    t.font = Font.regularMonospacedSystemFont(9);
+  }
 } else {
-  // home screen — branded
+  // home screen — branded card
   w.backgroundColor = BLACK;
   const head = w.addText('GAN Trading');
   head.font = Font.boldSystemFont(11);
   head.textColor = YELLOW;
-  w.addSpacer(6);
-  const p = w.addText(pnlTxt);
-  p.font = Font.boldSystemFont(26);
-  p.textColor = d.pnl >= 0 ? GREEN : RED;
   w.addSpacer(4);
-  if (d.lastCet) {
-    const l = w.addText(`${d.lastCet} · ${d.lastDir === 'S' ? 'Surplus' : 'Deficit'} · ${d.lastPrice} RON`);
-    l.font = Font.systemFont(12);
-    l.textColor = Color.white();
-  }
-  const a = w.addText(`acc ${d.acc !== null ? d.acc + '%' : '—'} · ${d.settled} settled`);
-  a.font = Font.systemFont(11);
-  a.textColor = GRAY;
+  const p = w.addText(pnlTxt);
+  p.font = Font.boldSystemFont(24);
+  p.textColor = d.pnl >= 0 ? GREEN : RED;
+  w.addSpacer(6);
+  rows.forEach((r, i) => {
+    const t = w.addText(line(r));
+    t.font = Font.regularMonospacedSystemFont(12);
+    t.textColor = i === 0 ? Color.white() : GRAY;
+    if (r.dir === 'D') t.textColor = i === 0 ? new Color('#ff6e62') : new Color('#a05550');
+  });
   w.addSpacer();
-  const ts = w.addText('as of ' + d.ts.slice(11, 16) + ' UTC');
+  const ts = w.addText(`acc ${d.acc !== null ? d.acc + '%' : '—'} · ${d.settled} settled · ${d.ts.slice(11, 16)} UTC`);
   ts.font = Font.systemFont(9);
   ts.textColor = GRAY;
 }
-w.url = 'https://gan-trading.onrender.com/pi'; // tap opens the app
+w.url = 'https://gan-trading.onrender.com/pi';
 w.refreshAfterDate = new Date(Date.now() + 5 * 60 * 1000);
 
 if (config.runsInWidget) Script.setWidget(w);
