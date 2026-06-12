@@ -209,7 +209,9 @@ const NAV = (active, date, refreshSec, extras) => `
   <div class="nav">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
-    <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a><span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
+    <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
+    <a href="#" title="toggle dark/light theme" onclick="toggleTheme();return false">◐</a>
+    <span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
   </div>
   <button class="menubtn r1" type="button" onclick="document.getElementById('mainmenu').classList.toggle('open');event.stopPropagation()">⋮</button>
   <div class="bbreak"></div>
@@ -219,10 +221,20 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
     <div class="menusep"></div>
     <a href="#" onclick="var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
+    <a href="#" onclick="toggleTheme();return false">Theme: <span id="thlabel"></span></a>
     <div class="menusep"></div>
     <a href="/logout">Sign out</a>
   </div>
-  <script>document.addEventListener('click',function(e){
+  <script>function toggleTheme(){
+    var t=document.documentElement.dataset.theme==='dark'?'light':'dark';
+    document.documentElement.dataset.theme=t;localStorage.setItem('theme',t);
+    var l=document.getElementById('thlabel');if(l)l.textContent=t;
+  }
+  window.addEventListener('DOMContentLoaded',function(){
+    var l=document.getElementById('thlabel');
+    if(l)l.textContent=document.documentElement.dataset.theme;
+  });
+  document.addEventListener('click',function(e){
     var m=document.getElementById('mainmenu');
     if(m&&!m.contains(e.target)&&!e.target.classList.contains('menubtn'))m.classList.remove('open');
   });
@@ -244,104 +256,134 @@ const NAV = (active, date, refreshSec, extras) => `
   });</script>
   </div>`;
 
-// YellowGrid Design System (data/design/colors_and_type.css) — white 50 / yellow 20 / black 15 / gray 15;
-// Nunito (Circular Std substitute) for headings/UI, Inter body, JetBrains Mono for readouts.
-const STYLE = `<style>
+// YellowGrid Design System (data/design/colors_and_type.css) — brand yellow as accent over a
+// themeable base. DARK is the default theme; html[data-theme='light'] restores the original
+// light palette. The inline script runs before CSS paint so there is no theme flash.
+const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark'</script>
+<style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
-  --yg-yellow:#FFF500;--yg-black:#121212;--yg-gray:#F6F6F6;
-  --yg-gray-600:#8A8A8A;--yg-gray-400:#A4A4A4;--yg-gray-200:#ECECEC;
-  --yg-yellow-highlight:#FFF59E;--yg-yellow-tint:#FFFCA8;
-  --yg-success:#1F9E57;--yg-info:#2F6FE0;--yg-danger:#D93A30;
+  --yg-yellow:#FFF500;--yg-black:#121212;
   --font-display:'Nunito',system-ui,sans-serif;--font-body:'Inter',system-ui,sans-serif;
   --font-mono:'JetBrains Mono',ui-monospace,monospace;
+  /* DARK (default) */
+  --bg-page:#101010;--bg-surface:#181818;--bg-subtle:#212121;--bg-banner:rgba(14,14,14,0.92);
+  --fg:#ececec;--fg-muted:#9b9b9b;
+  --border-1:#2b2b2b;--border-2:#454545;
+  --th-bg:#000000;
+  --pos:#3ecf81;--neg:#ff6e62;--info:#6ea8ff;
+  --tint-pos:rgba(31,158,87,0.14);--tint-neg:rgba(217,58,48,0.13);
+  --tint-pos-strong:rgba(31,158,87,0.34);--tint-neg-strong:rgba(217,58,48,0.30);
+  --tint-now:rgba(255,245,0,0.15);--auto-bg:rgba(255,245,0,0.16);
+  --tp-pos-bg:rgba(31,158,87,0.22);--tp-neg-bg:rgba(217,58,48,0.22);
+  --srp-bg:rgba(110,168,255,0.18);--dfc-bg:rgba(255,110,98,0.18);
+  --ic-s:#1F9E57;--ic-d:#D93A30;
 }
-body{font:13px/1.5 var(--font-body);margin:0;background:#fff;color:var(--yg-black);-webkit-font-smoothing:antialiased}
-.banner{position:sticky;top:0;z-index:50;background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);
-  border-bottom:1px solid var(--yg-gray-200);height:56px;padding:0 28px;display:flex;justify-content:space-between;align-items:center}
-.banner h1{margin:0;font-family:var(--font-display);font-weight:700;font-size:20px;letter-spacing:-0.02em;color:var(--yg-black)}
-.highlight{background-image:linear-gradient(95deg,var(--yg-yellow) 0%,var(--yg-yellow) 35%,rgba(255,245,0,0.7) 65%,rgba(255,245,0,0.25) 88%,rgba(255,245,0,0) 100%);
-  background-repeat:no-repeat;background-size:100% 60%;background-position:0 80%;padding:0 0.18em 0 0.06em}
+html[data-theme='light']{
+  --bg-page:#ffffff;--bg-surface:#ffffff;--bg-subtle:#F6F6F6;--bg-banner:rgba(255,255,255,0.92);
+  --fg:#121212;--fg-muted:#8A8A8A;
+  --border-1:#ECECEC;--border-2:#A4A4A4;
+  --th-bg:#121212;
+  --pos:#1F9E57;--neg:#D93A30;--info:#2F6FE0;
+  --tint-pos:#e9f7ee;--tint-neg:#fdeceb;
+  --tint-pos-strong:#c4e8d0;--tint-neg-strong:#f5cbc6;
+  --tint-now:#FFFCA8;--auto-bg:#FFF59E;
+  --tp-pos-bg:#dff2e6;--tp-neg-bg:#fbe5e3;
+  --srp-bg:#e3ecfb;--dfc-bg:#fbe5e3;
+  --ic-s:#1F9E57;--ic-d:#D93A30;
+}
+body{font:13px/1.5 var(--font-body);margin:0;background:var(--bg-page);color:var(--fg);-webkit-font-smoothing:antialiased}
+.banner{position:sticky;top:0;z-index:50;background:var(--bg-banner);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border-1);height:56px;padding:0 28px;display:flex;justify-content:space-between;align-items:center}
+.banner h1{margin:0;font-family:var(--font-display);font-weight:700;font-size:20px;letter-spacing:-0.02em;color:var(--fg)}
+.highlight{background:var(--yg-yellow);color:var(--yg-black);padding:1px 10px;border-radius:8px}
+html[data-theme='light'] .highlight{background:none;color:var(--yg-black);border-radius:0;padding:0 0.18em 0 0.06em;
+  background-image:linear-gradient(95deg,var(--yg-yellow) 0%,var(--yg-yellow) 35%,rgba(255,245,0,0.7) 65%,rgba(255,245,0,0.25) 88%,rgba(255,245,0,0) 100%);
+  background-repeat:no-repeat;background-size:100% 60%;background-position:0 80%}
 .nav{display:flex;align-items:center}
-.nav a{font-family:var(--font-display);font-weight:500;color:var(--yg-black);text-decoration:none;margin-left:14px;
+.nav a{font-family:var(--font-display);font-weight:500;color:var(--fg);text-decoration:none;margin-left:14px;
   font-size:14px;padding:8px 18px;border-radius:999px;transition:background 140ms cubic-bezier(0.16,1,0.3,1)}
-.nav a:hover{background:var(--yg-gray)}
+.nav a:hover{background:var(--bg-subtle)}
 .nav a.on{background:var(--yg-yellow);color:var(--yg-black);font-weight:700}
-.menubtn{display:none;font:700 18px var(--font-display);background:var(--yg-black);color:#fff;border:none;border-radius:999px;
+.menubtn{display:none;font:700 18px var(--font-display);background:var(--bg-subtle);color:var(--fg);border:1px solid var(--border-2);border-radius:999px;
   width:38px;height:38px;cursor:pointer;line-height:1;flex-shrink:0}
-.menu{display:none;position:fixed;top:62px;right:12px;background:#fff;border:1px solid var(--yg-gray-400);
-  border-radius:14px;box-shadow:0 20px 48px -12px rgba(18,18,18,0.2);min-width:210px;z-index:80;padding:8px}
+.menu{display:none;position:fixed;top:62px;right:12px;background:var(--bg-surface);border:1px solid var(--border-2);
+  border-radius:14px;box-shadow:0 20px 48px -12px rgba(0,0,0,0.5);min-width:210px;z-index:80;padding:8px}
 .menu.open{display:block}
-.menu a{display:block;font-family:var(--font-display);font-weight:500;font-size:14px;color:var(--yg-black);
+.menu a{display:block;font-family:var(--font-display);font-weight:500;font-size:14px;color:var(--fg);
   text-decoration:none;padding:11px 16px;border-radius:8px}
-.menu a:hover{background:var(--yg-gray)}
-.menu a.on{background:var(--yg-yellow);font-weight:700}
-.menusep{height:1px;background:var(--yg-gray-200);margin:6px 8px}
+.menu a:hover{background:var(--bg-subtle)}
+.menu a.on{background:var(--yg-yellow);color:var(--yg-black);font-weight:700}
+.menusep{height:1px;background:var(--border-1);margin:6px 8px}
 .totalpill{font-family:var(--font-mono);font-weight:700;font-size:15px;padding:6px 16px;border-radius:999px}
-.tp-pos{background:#dff2e6;color:var(--yg-success)}
-.tp-neg{background:#fbe5e3;color:var(--yg-danger)}
+.tp-pos{background:var(--tp-pos-bg);color:var(--pos)}
+.tp-neg{background:var(--tp-neg-bg);color:var(--neg)}
 .upd{display:flex;align-items:center}
-#updsec{font:13px var(--font-mono);color:var(--yg-black);background:var(--yg-gray);border:1px solid var(--yg-gray-200);
+#updsec{font:13px var(--font-mono);color:var(--fg);background:var(--bg-subtle);border:1px solid var(--border-1);
   border-radius:999px;padding:4px 12px;min-width:62px;text-align:center}
 .content{padding:18px 28px 48px}
 .datebar{display:flex;gap:8px;align-items:center}
-.datebar a{font-family:var(--font-display);font-weight:700;background:var(--yg-black);color:#fff;text-decoration:none;
-  padding:5px 14px;border-radius:999px;font-size:13px}
-.datebar a:hover{background:#2b2b2b}
-.datebar input{font:12px var(--font-body);padding:5px 10px;border:1px solid var(--yg-gray-400);border-radius:10px}
+.datebar a{font-family:var(--font-display);font-weight:700;background:var(--bg-subtle);color:var(--fg);text-decoration:none;
+  border:1px solid var(--border-2);padding:5px 14px;border-radius:999px;font-size:13px}
+.datebar a:hover{background:var(--border-1)}
+.datebar input{font:12px var(--font-body);padding:5px 10px;border:1px solid var(--border-2);border-radius:10px;
+  background:var(--bg-surface);color:var(--fg);color-scheme:dark}
+html[data-theme='light'] .datebar input{color-scheme:light}
 .datebar input:focus{outline:none;border-color:var(--yg-yellow);box-shadow:0 0 0 3px rgba(255,245,0,0.35)}
-table{width:100%;border-collapse:separate;border-spacing:0;margin:10px 0 26px;background:#fff;border:1px solid var(--yg-gray-400)}
-td,th{border-right:1px solid var(--yg-gray-400);border-bottom:1px solid var(--yg-gray-200);padding:4px 10px;text-align:left;font-size:12px;font-variant-numeric:tabular-nums}
+table{width:100%;border-collapse:separate;border-spacing:0;margin:10px 0 26px;background:var(--bg-surface);border:1px solid var(--border-2)}
+td,th{border-right:1px solid var(--border-2);border-bottom:1px solid var(--border-1);padding:4px 10px;text-align:left;font-size:12px;font-variant-numeric:tabular-nums}
 td:last-child,th:last-child{border-right:none}
-th{position:sticky;top:56px;z-index:5;background:var(--yg-black);color:#fff;font-family:var(--font-display);
-  font-weight:700;font-size:13px;letter-spacing:0.02em;padding:10px;border-color:var(--yg-black);
+th{position:sticky;top:56px;z-index:5;background:var(--th-bg);color:#fff;font-family:var(--font-display);
+  font-weight:700;font-size:13px;letter-spacing:0.02em;padding:10px;border-color:var(--th-bg);
   border-bottom:2px solid var(--yg-yellow);white-space:nowrap}
-tr:nth-child(even) td{background:var(--yg-gray)}
-.surplus{color:var(--yg-info);font-weight:700}.deficit{color:var(--yg-danger);font-weight:700}.mid{color:var(--yg-gray-600)}
-.hold{color:var(--yg-black);background:var(--yg-yellow-highlight);padding:1px 6px;border-radius:6px;font-weight:600;cursor:help}
-tr.now td{background:var(--yg-yellow-tint) !important;border-top:2px solid var(--yg-black);border-bottom:2px solid var(--yg-black)}
-tr.lastpos td{background:#c4e8d0 !important;border-top:2px solid var(--yg-success);border-bottom:2px solid var(--yg-success)}
-tr.lastneg td{background:#f5cbc6 !important;border-top:2px solid var(--yg-danger);border-bottom:2px solid var(--yg-danger)}
-.fc{color:var(--yg-gray-600);font-style:italic}
-.fc-ok{color:var(--yg-success);font-style:italic}
-.fc-bad{color:var(--yg-danger);font-style:italic}
-.pill2{font:12px var(--font-mono);background:var(--yg-gray);border:1px solid var(--yg-gray-200);border-radius:999px;padding:5px 12px;color:var(--yg-black);white-space:nowrap}
-.pill2 small{color:var(--yg-gray-600)}
+tr:nth-child(even) td{background:var(--bg-subtle)}
+.surplus{color:var(--info);font-weight:700}.deficit{color:var(--neg);font-weight:700}.mid{color:var(--fg-muted)}
+.hold{color:var(--yg-black);background:var(--yg-yellow);padding:1px 6px;border-radius:6px;font-weight:600;cursor:help}
+tr.now td{background:var(--tint-now) !important;border-top:2px solid var(--yg-yellow);border-bottom:2px solid var(--yg-yellow)}
+html[data-theme='light'] tr.now td{border-color:var(--yg-black)}
+tr.lastpos td{background:var(--tint-pos-strong) !important;border-top:2px solid var(--ic-s);border-bottom:2px solid var(--ic-s)}
+tr.lastneg td{background:var(--tint-neg-strong) !important;border-top:2px solid var(--ic-d);border-bottom:2px solid var(--ic-d)}
+.fc{color:var(--fg-muted);font-style:italic}
+.fc-ok{color:var(--pos);font-style:italic}
+.fc-bad{color:var(--neg);font-style:italic}
+.pill2{font:12px var(--font-mono);background:var(--bg-subtle);border:1px solid var(--border-1);border-radius:999px;padding:5px 12px;color:var(--fg);white-space:nowrap}
+.pill2 small{color:var(--fg-muted)}
 .colwrap{display:flex;align-items:center;position:relative}
-.colpanel{display:none;position:absolute;top:40px;right:0;background:#fff;border:1px solid var(--yg-gray-400);
-  border-radius:10px;box-shadow:0 8px 24px rgba(18,18,18,0.12);padding:10px 16px;z-index:60;columns:2;min-width:380px}
+.colpanel{display:none;position:absolute;top:40px;right:0;background:var(--bg-surface);border:1px solid var(--border-2);
+  border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.4);padding:10px 16px;z-index:60;columns:2;min-width:380px}
 .colpanel.open{display:block}
 .colpanel label{display:block;font-size:12px;padding:3px 0;white-space:nowrap;cursor:pointer}
-tr.winstart td{border-top:3px solid var(--yg-gray-600)}
-tr.winend td{border-bottom:3px solid var(--yg-gray-600)}
-.pos{color:var(--yg-success);font-weight:600}.neg{color:var(--yg-danger);font-weight:600}
-tr.pnlpos td{background:#e9f7ee}tr.pnlneg td{background:#fdeceb}
+tr.winstart td{border-top:3px solid var(--fg-muted)}
+tr.winend td{border-bottom:3px solid var(--fg-muted)}
+.pos{color:var(--pos);font-weight:600}.neg{color:var(--neg);font-weight:600}
+tr.pnlpos td{background:var(--tint-pos)}tr.pnlneg td{background:var(--tint-neg)}
 .money{font-family:var(--font-mono);font-weight:500;line-height:1}
 .badge{display:inline-block;font-family:var(--font-display);font-weight:700;font-size:10px;letter-spacing:0.04em;
   padding:2px 9px;border-radius:999px;vertical-align:middle}
 /* badge color follows the POSITION (blue = surplus, red = deficit); the text follows the
    page's market: PZU page shows the PZU action, PI page the balancing action */
-.badge.srp{background:#e3ecfb;color:var(--yg-info)}
-.badge.dfc{background:#fbe5e3;color:var(--yg-danger)}
+.badge.srp{background:var(--srp-bg);color:var(--info)}
+.badge.dfc{background:var(--dfc-bg);color:var(--neg)}
 .badge.flip{cursor:pointer;user-select:none;min-width:34px;text-align:center}
 .ic{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:999px;
   font:700 10px var(--font-display);color:#fff;vertical-align:middle;cursor:default}
-.ic-s{background:var(--yg-success)}.ic-d{background:var(--yg-danger)}
-input.bet{width:64px;font:13px var(--font-mono);padding:3px 8px;border:1px solid var(--yg-gray-400);border-radius:10px}
+.ic-s{background:var(--ic-s)}.ic-d{background:var(--ic-d)}
+input.bet{width:64px;font:13px var(--font-mono);padding:3px 8px;border:1px solid var(--border-2);border-radius:10px;
+  background:var(--bg-surface);color:var(--fg)}
 input.bet:focus{outline:none;border-color:var(--yg-yellow);box-shadow:0 0 0 3px rgba(255,245,0,0.35)}
-input.bet.auto{background:var(--yg-yellow-highlight);border-color:var(--yg-yellow)}
-input.bet:disabled{background:var(--yg-gray-200);color:var(--yg-gray-600);border-color:var(--yg-gray-200)}
-.lockbanner{background:var(--yg-gray);border:1px solid var(--yg-gray-200);padding:12px 18px;margin:10px 0;border-radius:14px;font-size:12px}
+input.bet.auto{background:var(--auto-bg);border-color:var(--yg-yellow)}
+input.bet:disabled{background:var(--bg-subtle);color:var(--fg-muted);border-color:var(--border-1)}
+.lockbanner{background:var(--bg-subtle);border:1px solid var(--border-1);padding:12px 18px;margin:10px 0;border-radius:14px;font-size:12px}
 button{font-family:var(--font-display);font-weight:700;font-size:12px;padding:7px 18px;cursor:pointer;
   background:var(--yg-yellow);color:var(--yg-black);border:none;border-radius:999px;transition:transform 140ms}
 button:active{transform:scale(0.98)}
-.meta{color:var(--yg-gray-600);font-size:11px;max-width:1100px}.dim td{opacity:0.5}
-#status{font-size:11px;color:var(--yg-success);margin-left:10px;font-family:var(--font-mono)}
-h2{margin:24px 0 6px;font-family:var(--font-display);font-weight:700;font-size:18px;letter-spacing:-0.01em;color:var(--yg-black)}
-small{color:var(--yg-gray-600)}
+.meta{color:var(--fg-muted);font-size:11px;max-width:1100px}.dim td{opacity:0.5}
+#status{font-size:11px;color:var(--pos);margin-left:10px;font-family:var(--font-mono)}
+h2{margin:24px 0 6px;font-family:var(--font-display);font-weight:700;font-size:18px;letter-spacing:-0.01em;color:var(--fg)}
+small{color:var(--fg-muted)}
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-.userchip{font:11px var(--font-mono);color:var(--yg-gray-600);margin-left:10px}
-.userchip a{color:var(--yg-gray-600)}
+.userchip{font:11px var(--font-mono);color:var(--fg-muted);margin-left:10px}
+.userchip a{color:var(--fg-muted)}
 .bbreak{display:none}
 @media (max-width:760px){
   /* Chrome-style two-row header: row1 = columns/date/menu (hides on scroll down, returns
@@ -811,8 +853,8 @@ const loginPage = (err) => `<!DOCTYPE html><html><head><meta charset="utf-8">
 <div class="content" style="max-width:360px;margin:60px auto">
 <h2>Sign in</h2>${err ? '<p class="neg">Wrong user or password.</p>' : ''}
 <form method="post" action="/login" style="display:flex;flex-direction:column;gap:12px">
-<input name="user" placeholder="user" autocomplete="username" style="font:inherit;padding:10px 14px;border:1px solid var(--yg-gray-400);border-radius:10px">
-<input name="pass" type="password" placeholder="password" autocomplete="current-password" style="font:inherit;padding:10px 14px;border:1px solid var(--yg-gray-400);border-radius:10px">
+<input name="user" placeholder="user" autocomplete="username" style="font:inherit;padding:10px 14px;border:1px solid var(--border-2);border-radius:10px">
+<input name="pass" type="password" placeholder="password" autocomplete="current-password" style="font:inherit;padding:10px 14px;border:1px solid var(--border-2);border-radius:10px">
 <button type="submit" style="padding:12px">Sign in</button>
 </form></div></body></html>`;
 
