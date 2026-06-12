@@ -206,11 +206,21 @@ const NAV = (active, date, refreshSec, extras) => `
     var el=document.getElementById('updsec');
     if(left<=0){el.textContent='⟳ data…';if(left<=-3)location.reload();return;}
     el.textContent='⟳ '+left+'s';},1000);})();</script>` : ''}
-  <div class="nav">
+  <button class="menubtn" type="button" onclick="document.getElementById('mainmenu').classList.toggle('open');event.stopPropagation()">⋮</button>
+  <div id="mainmenu" class="menu">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
-    <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a><span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
-  </div></div>`;
+    <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
+    <div class="menusep"></div>
+    <a href="#" onclick="var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
+    <div class="menusep"></div>
+    <a href="/logout">Sign out</a>
+  </div>
+  <script>document.addEventListener('click',function(e){
+    var m=document.getElementById('mainmenu');
+    if(m&&!m.contains(e.target)&&!e.target.classList.contains('menubtn'))m.classList.remove('open');
+  });</script>
+  </div>`;
 
 // YellowGrid Design System (data/design/colors_and_type.css) — white 50 / yellow 20 / black 15 / gray 15;
 // Nunito (Circular Std substitute) for headings/UI, Inter body, JetBrains Mono for readouts.
@@ -230,16 +240,23 @@ body{font:13px/1.5 var(--font-body);margin:0;background:#fff;color:var(--yg-blac
 .banner h1{margin:0;font-family:var(--font-display);font-weight:700;font-size:20px;letter-spacing:-0.02em;color:var(--yg-black)}
 .highlight{background-image:linear-gradient(95deg,var(--yg-yellow) 0%,var(--yg-yellow) 35%,rgba(255,245,0,0.7) 65%,rgba(255,245,0,0.25) 88%,rgba(255,245,0,0) 100%);
   background-repeat:no-repeat;background-size:100% 60%;background-position:0 80%;padding:0 0.18em 0 0.06em}
-.nav a{font-family:var(--font-display);font-weight:500;color:var(--yg-black);text-decoration:none;margin-left:14px;
-  font-size:14px;padding:8px 18px;border-radius:999px;transition:background 140ms cubic-bezier(0.16,1,0.3,1)}
-.nav a:hover{background:var(--yg-gray)}
+.menubtn{font:700 18px var(--font-display);background:var(--yg-black);color:#fff;border:none;border-radius:999px;
+  width:38px;height:38px;cursor:pointer;line-height:1;flex-shrink:0}
+.menu{display:none;position:fixed;top:62px;right:12px;background:#fff;border:1px solid var(--yg-gray-400);
+  border-radius:14px;box-shadow:0 20px 48px -12px rgba(18,18,18,0.2);min-width:210px;z-index:80;padding:8px}
+.menu.open{display:block}
+.menu a{display:block;font-family:var(--font-display);font-weight:500;font-size:14px;color:var(--yg-black);
+  text-decoration:none;padding:11px 16px;border-radius:8px}
+.menu a:hover{background:var(--yg-gray)}
+.menu a.on{background:var(--yg-yellow);font-weight:700}
+.menusep{height:1px;background:var(--yg-gray-200);margin:6px 8px}
+.colwrap button{display:none}
 .totalpill{font-family:var(--font-mono);font-weight:700;font-size:15px;padding:6px 16px;border-radius:999px}
 .tp-pos{background:#dff2e6;color:var(--yg-success)}
 .tp-neg{background:#fbe5e3;color:var(--yg-danger)}
 .upd{display:flex;align-items:center}
 #updsec{font:13px var(--font-mono);color:var(--yg-black);background:var(--yg-gray);border:1px solid var(--yg-gray-200);
   border-radius:999px;padding:4px 12px;min-width:62px;text-align:center}
-.nav a.on{background:var(--yg-yellow);color:var(--yg-black);font-weight:700}
 .content{padding:18px 28px 48px}
 .datebar{display:flex;gap:8px;align-items:center}
 .datebar a{font-family:var(--font-display);font-weight:700;background:var(--yg-black);color:#fff;text-decoration:none;
@@ -250,7 +267,9 @@ body{font:13px/1.5 var(--font-body);margin:0;background:#fff;color:var(--yg-blac
 table{width:100%;border-collapse:separate;border-spacing:0;margin:10px 0 26px;background:#fff;border:1px solid var(--yg-gray-400)}
 td,th{border-right:1px solid var(--yg-gray-400);border-bottom:1px solid var(--yg-gray-200);padding:4px 10px;text-align:left;font-size:12px;font-variant-numeric:tabular-nums}
 td:last-child,th:last-child{border-right:none}
-th{position:sticky;top:56px;z-index:5;background:var(--yg-black);color:#fff;font-family:var(--font-display);font-weight:500;border-color:var(--yg-black);white-space:nowrap}
+th{position:sticky;top:56px;z-index:5;background:var(--yg-black);color:#fff;font-family:var(--font-display);
+  font-weight:700;font-size:13px;letter-spacing:0.02em;padding:10px;border-color:var(--yg-black);
+  border-bottom:2px solid var(--yg-yellow);white-space:nowrap}
 tr:nth-child(even) td{background:var(--yg-gray)}
 .surplus{color:var(--yg-info);font-weight:700}.deficit{color:var(--yg-danger);font-weight:700}.mid{color:var(--yg-gray-600)}
 .hold{color:var(--yg-black);background:var(--yg-yellow-highlight);padding:1px 6px;border-radius:6px;font-weight:600;cursor:help}
@@ -298,12 +317,12 @@ small{color:var(--yg-gray-600)}
 .userchip{font:11px var(--font-mono);color:var(--yg-gray-600);margin-left:10px}
 .userchip a{color:var(--yg-gray-600)}
 @media (max-width:760px){
-  .banner{height:auto;flex-wrap:wrap;padding:8px 10px;gap:6px;position:sticky}
-  .banner h1{font-size:16px}
+  .banner{height:56px;flex-wrap:nowrap;padding:0 10px;gap:6px;overflow:hidden}
+  .banner h1{display:none}
   .content{padding:8px 2px 40px}
   table{table-layout:auto;width:100%}
   td,th{padding:8px 5px;font-size:15px;white-space:nowrap}
-  th{top:0;font-size:11px;white-space:normal}
+  th{top:56px;font-size:11px;white-space:normal;padding:8px 5px}
   td small{font-size:11px}
   .ic{width:22px;height:22px;font-size:12px}
   .badge{font-size:11px;padding:3px 8px}
@@ -406,7 +425,7 @@ ${NAV('pzu', date, null, extras)}<div class="content">
       ? `⚠ Manually UNLOCKED — changes are being recorded after the deadline. <button onclick="lockAgain()">Lock again</button>`
       : `Editable until 10:00 CET on ${euDate(addDays(date, -1))} (then locked).`}
   <span id="status"></span></div>
-<table><tr><th>Interval</th><th>CET</th><th>Prediction</th><th>Imbalance [MWh]</th><th>Price [RON/MWh]</th><th>PZU [RON/MWh]</th><th>Advice — PZU action [MWh]</th><th>Your position — PZU action [MWh]</th><th>Realized [RON/MWh]</th><th>Model result [RON]</th><th>Result [RON]</th></tr>
+<table><tr><th>Interval</th><th>CET</th><th>Prediction</th><th title="predicted imbalance, MWh">Imbalance</th><th title="predicted imbalance price, RON/MWh">Price</th><th title="PZU price, RON/MWh">PZU</th><th title="MWh, PZU-side action">Advice</th><th title="MWh, PZU-side action">Your position</th><th title="realized imbalance price, RON/MWh">Realized</th><th title="RON">Model result</th><th title="RON">Result</th></tr>
 ${rows}
 ${anyResult || anyModel ? `<tr><td colspan="9" style="text-align:right"><b>Day total</b></td>
 <td>${anyModel ? `<b class="${totalModel >= 0 ? 'pos' : 'neg'}">${Math.round(totalModel).toLocaleString('en-US')} RON</b>` : ''}</td>
@@ -671,7 +690,7 @@ function piPage(date) {
     ${colPicker('cols-pi', [0, 5, 6, 7, 8])}`; // phone default: CET, Type, Qty, Price, position, P&L
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PI ${date}</title>${STYLE}</head><body>
 ${NAV('pi', date, { left: updLeft, period: 300 }, extras)}<div class="content">
-<table><tr><th>Interval</th><th>CET</th><th>Type</th><th>Qty [MWh]</th><th>Price [RON/MWh]</th><th title="country generation; hover a value for the per-source split">Prod [MW]</th><th>Cons [MW]</th><th title="net cross-border: ↑ export, ↓ import">X-B [MW]</th><th title="DA-coupling net position committed yesterday on PZU: ↑ export, ↓ import">PZU D−1 [MW]</th><th>My position — BAL action [MWh]</th><th>P&amp;L [RON]</th></tr>
+<table><tr><th>Interval</th><th>CET</th><th>Type</th><th title="system imbalance, MWh">Qty</th><th title="imbalance price, RON/MWh">Price</th><th title="country generation [MW]; hover a value for the per-source split">Prod</th><th title="consumption [MW]">Cons</th><th title="net cross-border [MW]: ↑ export, ↓ import">X-B</th><th title="DA-coupling net position committed yesterday on PZU [MW]: ↑ export, ↓ import">PZU D−1</th><th title="your position [MWh], balancing-side action">My position</th><th title="RON">P&amp;L</th></tr>
 ${body}</table></div>
 <script>window.addEventListener('DOMContentLoaded',function(){
   var n=document.querySelector('tr.now')||document.querySelector('tr.lastpos,tr.lastneg');
