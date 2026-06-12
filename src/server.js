@@ -105,6 +105,11 @@ const colPicker = (key, mobileHidden) => `
     localStorage.setItem(key,JSON.stringify(Array.from(hidden)));
     apply();
   });
+  // close the panel when clicking/tapping anywhere outside it
+  document.addEventListener('click',function(e){
+    if(panel.classList.contains('open')&&!panel.contains(e.target)&&!e.target.closest('.colwrap'))
+      panel.classList.remove('open');
+  });
   apply();
 });</script>`;
 
@@ -220,7 +225,7 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
     <div class="menusep"></div>
-    <a href="#" onclick="var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
+    <a href="#" onclick="event.stopPropagation();var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
     <a href="#" onclick="toggleTheme();return false">Theme: <span id="thlabel"></span></a>
     <div class="menusep"></div>
     <a href="/logout">Sign out</a>
