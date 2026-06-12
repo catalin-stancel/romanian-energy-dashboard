@@ -75,7 +75,7 @@ const dirIcon = (surplus) => `<span class="ic ${surplus ? 'ic-s' : 'ic-d'}" titl
 
 // column visibility picker; selection persists in localStorage per page
 const colPicker = (key, mobileHidden) => `
-<div class="colwrap"><button type="button" onclick="document.getElementById('colpanel').classList.toggle('open')">Columns ▾</button>
+<div class="colwrap r1"><button type="button" onclick="document.getElementById('colpanel').classList.toggle('open')">Columns ▾</button>
 <div id="colpanel" class="colpanel"></div></div>
 <script>window.addEventListener('DOMContentLoaded',function(){
   var key=${JSON.stringify(key)};
@@ -195,12 +195,12 @@ const NAV = (active, date, refreshSec, extras) => `
 <div class="banner">
   <h1><span class="highlight">GAN Trading</span></h1>
   ${extras || ''}
-  ${date ? `<div class="datebar">
+  ${date ? `<div class="datebar r1">
     <a href="/${active}?date=${addDays(date, -1)}">&larr;</a>
     <input type="date" value="${date}" onchange="location='/${active}?date='+this.value">
     <a href="/${active}?date=${addDays(date, 1)}">&rarr;</a>
   </div>` : ''}
-  ${refreshSec ? `<div class="upd" title="time until the next balancing-data refresh (DAMAS pull, every ${Math.round(refreshSec.period / 60)} min)">
+  ${refreshSec ? `<div class="upd r2" title="time until the next balancing-data refresh (DAMAS pull, every ${Math.round(refreshSec.period / 60)} min)">
     <span id="updsec">⟳ ${refreshSec.left}s</span></div>
   <script>(function(){var left=${refreshSec.left};setInterval(function(){left--;
     var el=document.getElementById('updsec');
@@ -211,7 +211,8 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a><span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
   </div>
-  <button class="menubtn" type="button" onclick="document.getElementById('mainmenu').classList.toggle('open');event.stopPropagation()">⋮</button>
+  <button class="menubtn r1" type="button" onclick="document.getElementById('mainmenu').classList.toggle('open');event.stopPropagation()">⋮</button>
+  <div class="bbreak"></div>
   <div id="mainmenu" class="menu">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
@@ -224,6 +225,22 @@ const NAV = (active, date, refreshSec, extras) => `
   <script>document.addEventListener('click',function(e){
     var m=document.getElementById('mainmenu');
     if(m&&!m.contains(e.target)&&!e.target.classList.contains('menubtn'))m.classList.remove('open');
+  });
+  // Chrome-style header on mobile: the nav row hides on scroll down, returns on scroll up;
+  // the table header pins below whatever banner height is currently visible (--bh)
+  window.addEventListener('DOMContentLoaded',function(){
+    var banner=document.querySelector('.banner');
+    if(!banner)return;
+    function setBH(){document.documentElement.style.setProperty('--bh',banner.offsetHeight+'px')}
+    setBH();window.addEventListener('resize',setBH);
+    var lastY=window.scrollY;
+    window.addEventListener('scroll',function(){
+      if(!window.matchMedia('(max-width:760px)').matches)return;
+      var y=window.scrollY;
+      if(y>lastY+8&&y>70){banner.classList.add('hidenav');setBH();}
+      else if(y<lastY-8){banner.classList.remove('hidenav');setBH();}
+      lastY=y;
+    },{passive:true});
   });</script>
   </div>`;
 
@@ -325,15 +342,24 @@ small{color:var(--yg-gray-600)}
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .userchip{font:11px var(--font-mono);color:var(--yg-gray-600);margin-left:10px}
 .userchip a{color:var(--yg-gray-600)}
+.bbreak{display:none}
 @media (max-width:760px){
-  .banner{height:56px;flex-wrap:nowrap;padding:0 54px 0 10px;gap:6px;overflow-x:auto;overflow-y:visible}
+  /* Chrome-style two-row header: row1 = columns/date/menu (hides on scroll down, returns
+     on scroll up), row2 = money/exp/acc/timer (always pinned) */
+  .banner{height:auto;flex-wrap:wrap;padding:6px 10px;gap:6px;row-gap:8px;overflow:visible}
   .banner h1{display:none}
   .nav{display:none}
-  .menubtn{display:block;position:fixed;right:8px;top:9px;z-index:81}
+  .r1,.colwrap{order:1}
+  .bbreak{display:block;order:2;width:100%;height:0;margin:0}
+  .r2{order:3}
+  .menubtn{display:block;position:static;margin-left:auto;flex-shrink:0}
+  .colwrap button{display:inline-block;font-size:12px;padding:6px 14px}
+  .banner.hidenav .r1,.banner.hidenav .bbreak,.banner.hidenav .colwrap{display:none}
+  .menu{top:calc(var(--bh,96px) + 4px)}
   .content{padding:8px 2px 40px}
   table{table-layout:auto;width:100%}
   td,th{padding:8px 5px;font-size:15px;white-space:nowrap}
-  th{top:56px;font-size:11px;white-space:normal;padding:8px 5px}
+  th{top:var(--bh,96px);font-size:11px;white-space:normal;padding:8px 5px}
   td small{font-size:11px}
   .ic{width:22px;height:22px;font-size:12px}
   .badge{font-size:11px;padding:3px 8px}
@@ -416,14 +442,14 @@ function pzuPage(date) {
     }
   }
   const accPill = accN
-    ? `<span class="pill2" title="decision-time prediction direction accuracy"><small>acc</small> ${Math.round(accHits / accN * 100)}%</span>`
+    ? `<span class="pill2 r2" title="decision-time prediction direction accuracy"><small>acc</small> ${Math.round(accHits / accN * 100)}%</span>`
     : winN
-      ? `<span class="pill2" title="model position win rate (no stored predictions for this day)"><small>win</small> ${Math.round(winHits / winN * 100)}%</span>`
+      ? `<span class="pill2 r2" title="model position win rate (no stored predictions for this day)"><small>win</small> ${Math.round(winHits / winN * 100)}%</span>`
       : '';
   const dayTotal = anyResult ? totalResult : anyModel ? totalModel : null;
   const extras = `
-    ${dayTotal !== null ? `<span class="totalpill ${dayTotal >= 0 ? 'tp-pos' : 'tp-neg'}" title="${anyResult ? 'your realized day total' : 'model realized day total'}">${Math.round(dayTotal).toLocaleString('en-US')} RON</span>` : ''}
-    <span class="pill2" title="expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
+    ${dayTotal !== null ? `<span class="totalpill r2 ${dayTotal >= 0 ? 'tp-pos' : 'tp-neg'}" title="${anyResult ? 'your realized day total' : 'model realized day total'}">${Math.round(dayTotal).toLocaleString('en-US')} RON</span>` : ''}
+    <span class="pill2 r2" title="expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
     ${accPill}
     ${colPicker('cols-pzu')}`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PZU ${date}</title>${STYLE}</head><body>
@@ -694,9 +720,9 @@ function piPage(date) {
       ON x.ts_utc=b.ts_utc AND x.mr=b.run_at
     WHERE b.date_ro=? AND b.qty > 0`).get(date).s;
   const extras = `
-    <span class="totalpill ${cum >= 0 ? 'tp-pos' : 'tp-neg'}" title="realized day P&L">${Math.round(cum).toLocaleString('en-US')} RON</span>
-    <span class="pill2" title="model's expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
-    <span class="pill2" title="locked prediction direction accuracy today"><small>acc</small> ${lockJudged ? Math.round(lockHits / lockJudged * 100) + '%' : '—'}</span>
+    <span class="totalpill r2 ${cum >= 0 ? 'tp-pos' : 'tp-neg'}" title="realized day P&L">${Math.round(cum).toLocaleString('en-US')} RON</span>
+    <span class="pill2 r2" title="model's expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
+    <span class="pill2 r2" title="locked prediction direction accuracy today"><small>acc</small> ${lockJudged ? Math.round(lockHits / lockJudged * 100) + '%' : '—'}</span>
     ${colPicker('cols-pi', [0, 5, 6, 7, 8])}`; // phone default: CET, Type, Qty, Price, position, P&L
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PI ${date}</title>${STYLE}</head><body>
 ${NAV('pi', date, { left: updLeft, period: 300 }, extras)}<div class="content">
