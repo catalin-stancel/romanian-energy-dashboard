@@ -1,0 +1,27 @@
+# Render blueprint — single web service owning the SQLite database on a persistent disk.
+# All data pulls / prediction jobs run in-process (src/scheduler.js), no separate cron services
+# (Render disks cannot be shared between services).
+services:
+  - type: web
+    name: gan-trading
+    runtime: node
+    plan: standard            # 2 GB RAM; offers parse runs as a memory-capped child process
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: gan-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: ENABLE_JOBS
+        value: "1"
+      - key: ENTSOE_TOKEN
+        sync: false           # set in dashboard
+      - key: USERS
+        sync: false           # "catalin:pass1,georgiana:pass2,iulian:pass3" — set in dashboard
+      - key: SESSION_SECRET
+        generateValue: true

@@ -1,0 +1,8 @@
+{
+  "entsoe_token": "PASTE-YOUR-TOKEN-HERE",
+  "eur_ron": 5.24,
+  "trade_window_cet": [7, 22],
+  "max_mwh_per_isp": 2.5,
+  "min_mwh_per_isp": 2.0,
+  "risk_aversion": 0.5
+}

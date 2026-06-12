@@ -1,0 +1,18 @@
+{
+  "name": "gan-trading-cloud",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GAN Energy trading tool — Render deployment (PZU/PI positions, balancing predictions)",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/server.js",
+    "train": "node --max-old-space-size=2048 src/train.js",
+    "backfill:entsoe": "node src/pull_entsoe.js backfill 2024-06-01 2026-06-13",
+    "backfill:damas": "node src/pull_damas.js backfill 2024-07-20 2026-06-13"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "fast-xml-parser": "^5.0.0",
+    "xlsx": "^0.18.5"
+  }
+}
