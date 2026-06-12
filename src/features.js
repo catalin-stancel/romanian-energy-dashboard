@@ -109,6 +109,8 @@ const FEATURE_NAMES = [
   'stack_down_mw', 'stack_up_mw',
   'horizon_h',
   'blk1', 'blk2', 'blk3', 'blk4', 'blk5', 'blk6', 'blk7', // 3h-block dummies (blk0 = ref)
+  // appended last for backward compatibility with older model vectors:
+  'imb_trend', // 45-min mean minus 2h mean of system imbalance — negative = surplus collapsing
 ];
 
 // ctx = {maps, stacks, weatherIdx}; target = Date of ISP start (UTC); asOf = Date
@@ -142,6 +144,8 @@ function featuresFor(ctx, target, asOf) {
   const w100 = weatherAt(ctx.weatherIdx, 'wind_speed_100m', ts, tsAt(asOf));
   const temp = weatherAt(ctx.weatherIdx, 'temperature_2m', ts, tsAt(asOf));
 
+  const imb2h = recentMean(m.damas_est_sys_imbalance, asOf, 8);
+  const imb45 = recentMean(m.damas_est_sys_imbalance, asOf, 3);
   const sameDay = roDateIsp(asOf).date === date;
   const horizonH = (target.getTime() - asOf.getTime()) / 3600000;
   const block = Math.floor((isp - 1) / 12); // 0..7
@@ -156,8 +160,8 @@ function featuresFor(ctx, target, asOf) {
       1,
       Math.sin((2 * Math.PI * isp) / 96), Math.cos((2 * Math.PI * isp) / 96),
       dow === 0 || dow === 6 ? 1 : 0,
-      recentMean(m.damas_est_sys_imbalance, asOf, 8),
-      recentMean(m.damas_est_sys_imbalance, asOf, 3),
+      imb2h,
+      imb45,
       recentMean(m.damas_est_price_pos, asOf, 8),
       get(m.damas_est_sys_imbalance, yesterday),
       solarNow,
@@ -170,6 +174,7 @@ function featuresFor(ctx, target, asOf) {
       horizonH,
       block === 1 ? 1 : 0, block === 2 ? 1 : 0, block === 3 ? 1 : 0, block === 4 ? 1 : 0,
       block === 5 ? 1 : 0, block === 6 ? 1 : 0, block === 7 ? 1 : 0,
+      imb45 !== null && imb2h !== null ? imb45 - imb2h : null,
     ],
     meta: { date, isp, ts },
   };
