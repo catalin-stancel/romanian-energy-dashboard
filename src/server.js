@@ -74,7 +74,7 @@ const dayTitle = (d) => ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
 const dirIcon = (surplus) => `<span class="ic ${surplus ? 'ic-s' : 'ic-d'}" title="${surplus ? 'Surplus' : 'Deficit'}">${surplus ? 'S' : 'D'}</span>`;
 
 // column visibility picker; selection persists in localStorage per page
-const colPicker = (key) => `
+const colPicker = (key, mobileHidden) => `
 <div class="colwrap"><button type="button" onclick="document.getElementById('colpanel').classList.toggle('open')">Columns ▾</button>
 <div id="colpanel" class="colpanel"></div></div>
 <script>window.addEventListener('DOMContentLoaded',function(){
@@ -82,7 +82,10 @@ const colPicker = (key) => `
   var table=document.querySelector('.content table');
   if(!table)return;
   var head=[].map.call(table.rows[0].cells,function(c){return c.textContent.trim()});
-  var hidden=new Set(JSON.parse(localStorage.getItem(key)||'[]'));
+  // device default: phones start with a slim column set until the user picks their own
+  var saved=localStorage.getItem(key);
+  var hidden=new Set(saved?JSON.parse(saved)
+    :(window.matchMedia('(max-width:760px)').matches?${JSON.stringify(mobileHidden || [])}:[]));
   function apply(){
     for(var r=0;r<table.rows.length;r++){
       var row=table.rows[r];
@@ -295,16 +298,21 @@ small{color:var(--yg-gray-600)}
 .userchip{font:11px var(--font-mono);color:var(--yg-gray-600);margin-left:10px}
 .userchip a{color:var(--yg-gray-600)}
 @media (max-width:760px){
-  .banner{height:auto;flex-wrap:wrap;padding:8px 12px;gap:6px}
+  .banner{height:auto;flex-wrap:wrap;padding:8px 10px;gap:6px;position:sticky}
   .banner h1{font-size:16px}
-  .content{padding:10px 8px 40px}
-  td,th{padding:6px 8px;font-size:11px}
-  th{top:0}
-  input.bet{width:56px;padding:8px 6px;font-size:14px}
+  .content{padding:8px 2px 40px}
+  table{table-layout:auto;width:100%}
+  td,th{padding:8px 5px;font-size:15px;white-space:nowrap}
+  th{top:0;font-size:11px;white-space:normal}
+  td small{font-size:11px}
+  .ic{width:22px;height:22px;font-size:12px}
+  .badge{font-size:11px;padding:3px 8px}
+  input.bet{width:64px;padding:10px 6px;font-size:16px}
   .nav a{padding:8px 12px;font-size:12px;margin-left:4px}
-  .totalpill{font-size:13px;padding:5px 10px}
+  .totalpill{font-size:14px;padding:6px 12px}
   .pill2{font-size:11px;padding:4px 8px}
   .colpanel{position:fixed;top:auto;left:8px;right:8px;columns:2;min-width:0}
+  h2{font-size:15px}
 }
 </style>`;
 
@@ -660,11 +668,16 @@ function piPage(date) {
     <span class="totalpill ${cum >= 0 ? 'tp-pos' : 'tp-neg'}" title="realized day P&L">${Math.round(cum).toLocaleString('en-US')} RON</span>
     <span class="pill2" title="model's expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
     <span class="pill2" title="locked prediction direction accuracy today"><small>acc</small> ${lockJudged ? Math.round(lockHits / lockJudged * 100) + '%' : '—'}</span>
-    ${colPicker('cols-pi')}`;
+    ${colPicker('cols-pi', [0, 5, 6, 7, 8])}`; // phone default: CET, Type, Qty, Price, position, P&L
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PI ${date}</title>${STYLE}</head><body>
 ${NAV('pi', date, { left: updLeft, period: 300 }, extras)}<div class="content">
 <table><tr><th>Interval</th><th>CET</th><th>Type</th><th>Qty [MWh]</th><th>Price [RON/MWh]</th><th title="country generation; hover a value for the per-source split">Prod [MW]</th><th>Cons [MW]</th><th title="net cross-border: ↑ export, ↓ import">X-B [MW]</th><th title="DA-coupling net position committed yesterday on PZU: ↑ export, ↓ import">PZU D−1 [MW]</th><th>My position — BAL action [MWh]</th><th>P&amp;L [RON]</th></tr>
-${body}</table></div></body></html>`;
+${body}</table></div>
+<script>window.addEventListener('DOMContentLoaded',function(){
+  var n=document.querySelector('tr.now')||document.querySelector('tr.lastpos,tr.lastneg');
+  if(n)setTimeout(function(){n.scrollIntoView({block:'center'})},50);
+});</script>
+</body></html>`;
 }
 
 function perfPage() {
