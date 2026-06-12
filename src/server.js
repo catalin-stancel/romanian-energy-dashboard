@@ -206,6 +206,11 @@ const NAV = (active, date, refreshSec, extras) => `
     var el=document.getElementById('updsec');
     if(left<=0){el.textContent='⟳ data…';if(left<=-3)location.reload();return;}
     el.textContent='⟳ '+left+'s';},1000);})();</script>` : ''}
+  <div class="nav">
+    <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
+    <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
+    <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a><span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
+  </div>
   <button class="menubtn" type="button" onclick="document.getElementById('mainmenu').classList.toggle('open');event.stopPropagation()">⋮</button>
   <div id="mainmenu" class="menu">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
@@ -240,7 +245,12 @@ body{font:13px/1.5 var(--font-body);margin:0;background:#fff;color:var(--yg-blac
 .banner h1{margin:0;font-family:var(--font-display);font-weight:700;font-size:20px;letter-spacing:-0.02em;color:var(--yg-black)}
 .highlight{background-image:linear-gradient(95deg,var(--yg-yellow) 0%,var(--yg-yellow) 35%,rgba(255,245,0,0.7) 65%,rgba(255,245,0,0.25) 88%,rgba(255,245,0,0) 100%);
   background-repeat:no-repeat;background-size:100% 60%;background-position:0 80%;padding:0 0.18em 0 0.06em}
-.menubtn{font:700 18px var(--font-display);background:var(--yg-black);color:#fff;border:none;border-radius:999px;
+.nav{display:flex;align-items:center}
+.nav a{font-family:var(--font-display);font-weight:500;color:var(--yg-black);text-decoration:none;margin-left:14px;
+  font-size:14px;padding:8px 18px;border-radius:999px;transition:background 140ms cubic-bezier(0.16,1,0.3,1)}
+.nav a:hover{background:var(--yg-gray)}
+.nav a.on{background:var(--yg-yellow);color:var(--yg-black);font-weight:700}
+.menubtn{display:none;font:700 18px var(--font-display);background:var(--yg-black);color:#fff;border:none;border-radius:999px;
   width:38px;height:38px;cursor:pointer;line-height:1;flex-shrink:0}
 .menu{display:none;position:fixed;top:62px;right:12px;background:#fff;border:1px solid var(--yg-gray-400);
   border-radius:14px;box-shadow:0 20px 48px -12px rgba(18,18,18,0.2);min-width:210px;z-index:80;padding:8px}
@@ -250,7 +260,6 @@ body{font:13px/1.5 var(--font-body);margin:0;background:#fff;color:var(--yg-blac
 .menu a:hover{background:var(--yg-gray)}
 .menu a.on{background:var(--yg-yellow);font-weight:700}
 .menusep{height:1px;background:var(--yg-gray-200);margin:6px 8px}
-.colwrap button{display:none}
 .totalpill{font-family:var(--font-mono);font-weight:700;font-size:15px;padding:6px 16px;border-radius:999px}
 .tp-pos{background:#dff2e6;color:var(--yg-success)}
 .tp-neg{background:#fbe5e3;color:var(--yg-danger)}
@@ -317,8 +326,10 @@ small{color:var(--yg-gray-600)}
 .userchip{font:11px var(--font-mono);color:var(--yg-gray-600);margin-left:10px}
 .userchip a{color:var(--yg-gray-600)}
 @media (max-width:760px){
-  .banner{height:56px;flex-wrap:nowrap;padding:0 10px;gap:6px;overflow:hidden}
+  .banner{height:56px;flex-wrap:nowrap;padding:0 54px 0 10px;gap:6px;overflow-x:auto;overflow-y:visible}
   .banner h1{display:none}
+  .nav{display:none}
+  .menubtn{display:block;position:fixed;right:8px;top:9px;z-index:81}
   .content{padding:8px 2px 40px}
   table{table-layout:auto;width:100%}
   td,th{padding:8px 5px;font-size:15px;white-space:nowrap}
@@ -327,8 +338,7 @@ small{color:var(--yg-gray-600)}
   .ic{width:22px;height:22px;font-size:12px}
   .badge{font-size:11px;padding:3px 8px}
   input.bet{width:64px;padding:10px 6px;font-size:16px}
-  .nav a{padding:8px 12px;font-size:12px;margin-left:4px}
-  .totalpill{font-size:14px;padding:6px 12px}
+  .totalpill{font-size:14px;padding:6px 12px;flex-shrink:0}
   .pill2{font-size:11px;padding:4px 8px}
   .colpanel{position:fixed;top:auto;left:8px;right:8px;columns:2;min-width:0}
   h2{font-size:15px}
