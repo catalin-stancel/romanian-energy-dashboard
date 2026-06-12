@@ -452,7 +452,7 @@ function pzuPage(date) {
     <span class="pill2 r2" title="expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
     ${accPill}
     ${colPicker('cols-pzu')}`;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PZU ${date}</title>${STYLE}</head><body>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>PZU ${date}</title>${STYLE}</head><body>
 ${NAV('pzu', date, null, extras)}<div class="content">
 <h2>PZU positions — ${dayTitle(date)} (delivery day)</h2>
 <div class="lockbanner">${d.locked
@@ -724,7 +724,7 @@ function piPage(date) {
     <span class="pill2 r2" title="model's expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
     <span class="pill2 r2" title="locked prediction direction accuracy today"><small>acc</small> ${lockJudged ? Math.round(lockHits / lockJudged * 100) + '%' : '—'}</span>
     ${colPicker('cols-pi', [0, 5, 6, 7, 8])}`; // phone default: CET, Type, Qty, Price, position, P&L
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PI ${date}</title>${STYLE}</head><body>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>PI ${date}</title>${STYLE}</head><body>
 ${NAV('pi', date, { left: updLeft, period: 300 }, extras)}<div class="content">
 <table><tr><th>Interval</th><th>CET</th><th>Type</th><th title="system imbalance, MWh">Qty</th><th title="imbalance price, RON/MWh">Price</th><th title="country generation [MW]; hover a value for the per-source split">Prod</th><th title="consumption [MW]">Cons</th><th title="net cross-border [MW]: ↑ export, ↓ import">X-B</th><th title="DA-coupling net position committed yesterday on PZU [MW]: ↑ export, ↓ import">PZU D−1</th><th title="your position [MWh], balancing-side action">My position</th><th title="RON">P&amp;L</th></tr>
 ${body}</table></div>
@@ -749,7 +749,7 @@ function perfPage() {
     FROM user_bets ub WHERE ub.qty != 0 GROUP BY ub.date_ro ORDER BY ub.date_ro DESC LIMIT 14`).all();
   const model = JSON.parse(fs.readFileSync(path.join(__dirname, 'model.json'), 'utf8'));
   const fmtPct = (v) => (v === null || v === undefined ? '—' : (v * 100).toFixed(1) + '%');
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Performance</title>${STYLE}</head><body>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Performance</title>${STYLE}</head><body>
 ${NAV('perf', '')}<div class="content">
 <h2>Model — ${model.version} (trained ${model.trainedAt?.slice(0, 10)})</h2>
 <p class="meta">Holdout: short ${fmtPct(model.eval?.short?.accuracy)} (conf+big ${fmtPct(model.eval?.short?.confidentBigAcc)}) · long ${fmtPct(model.eval?.long?.accuracy)} (conf+big ${fmtPct(model.eval?.long?.confidentBigAcc)})</p>
@@ -806,7 +806,7 @@ const cookieUser = (req) => {
 };
 
 const loginPage = (err) => `<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">${STYLE}<title>Sign in</title></head><body>
+<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png">${STYLE}<title>Sign in</title></head><body>
 <div class="banner"><h1><span class="highlight">GAN Trading</span></h1></div>
 <div class="content" style="max-width:360px;margin:60px auto">
 <h2>Sign in</h2>${err ? '<p class="neg">Wrong user or password.</p>' : ''}
@@ -825,6 +825,20 @@ const server = http.createServer(async (req, res) => {
 
     // unauthenticated routes
     if (url.pathname === '/health') return json({ ok: true, ts: new Date().toISOString() });
+    if (url.pathname === '/manifest.json') {
+      return send(200, 'application/manifest+json', JSON.stringify({
+        name: 'GAN Trading', short_name: 'GAN', start_url: '/pi', display: 'standalone',
+        background_color: '#FFFFFF', theme_color: '#FFF500',
+        icons: [
+          { src: '/icon-180.png', sizes: '180x180', type: 'image/png' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+        ],
+      }));
+    }
+    if (url.pathname === '/icon-180.png' || url.pathname === '/icon-512.png') {
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+      return res.end(fs.readFileSync(path.join(__dirname, 'assets', url.pathname.slice(1))));
+    }
     if (url.pathname === '/login') {
       if (req.method === 'POST') {
         const { user, pass } = await readForm(req);
