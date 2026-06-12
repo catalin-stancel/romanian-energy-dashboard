@@ -809,6 +809,48 @@ ${userDays.map((r) => `<tr><td>${euDate(r.date_ro)}</td><td>${r.n}</td><td>${r.m
 </div></body></html>`;
 }
 
+// ---- widget support: key auth (auto-generated on first boot) + compact day summary ----
+const WIDGET_KEY = (() => {
+  const f = path.join(process.env.DATA_DIR || path.join(__dirname, '..', 'data'), 'widget.key');
+  try { return fs.readFileSync(f, 'utf8').trim(); }
+  catch {
+    const k = require('crypto').randomBytes(16).toString('hex');
+    fs.writeFileSync(f, k);
+    return k;
+  }
+})();
+
+function widgetData() {
+  const cfg = loadConfig();
+  const today = roDateIsp(new Date()).date;
+  const userBets = new Map(db.prepare('SELECT isp, qty FROM user_bets WHERE date_ro=?').all(today).map((r) => [r.isp, r.qty]));
+  let pnl = 0, settled = 0, lastIsp = null, lastPrice = null, lastImb = null;
+  for (const { isp, ts } of dayTimestamps(today)) {
+    const imbPrice = sv('damas_est_price_pos', ts);
+    const imb = sv('damas_est_sys_imbalance', ts);
+    if (imbPrice !== null) { lastIsp = isp; lastPrice = imbPrice; lastImb = imb; }
+    const qty = userBets.get(isp);
+    if (qty && imbPrice !== null) {
+      const pzu = sv('pzu_ron', ts) ?? (sv('da_price', ts) !== null ? sv('da_price', ts) * cfg.eur_ron : null);
+      if (pzu !== null) { pnl += qty * (imbPrice - pzu); settled++; }
+    }
+  }
+  const acc = db.prepare(`
+    SELECT COUNT(*) n, SUM(CASE WHEN (p.prob_long>0.5)=(p.realized_imb>0) THEN 1 ELSE 0 END) h
+    FROM predictions p
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE actionable=1 GROUP BY ts_utc) x
+      ON x.ts_utc=p.ts_utc AND x.mr=p.run_at
+    WHERE p.date_ro=? AND p.realized_imb IS NOT NULL`).get(today);
+  return {
+    date: today, pnl: Math.round(pnl), settled,
+    acc: acc.n ? Math.round(acc.h / acc.n * 100) : null,
+    lastIsp, lastCet: lastIsp ? cetLabel(lastIsp).replace(/<[^>]+>/g, '') : null,
+    lastPrice: lastPrice !== null ? Math.round(lastPrice) : null,
+    lastDir: lastImb !== null ? (lastImb > 0 ? 'S' : 'D') : null,
+    ts: new Date().toISOString(),
+  };
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     let b = '';
@@ -872,6 +914,11 @@ const server = http.createServer(async (req, res) => {
 
     // unauthenticated routes
     if (url.pathname === '/health') return json({ ok: true, ts: new Date().toISOString() });
+    if (url.pathname === '/api/widget') {
+      // key-authenticated summary for iOS lock/home-screen widgets (Scriptable can't do cookies)
+      if (url.searchParams.get('key') !== WIDGET_KEY) return send(401, 'application/json', '{"error":"bad key"}');
+      return json(widgetData());
+    }
     if (url.pathname === '/manifest.json') {
       return send(200, 'application/manifest+json', JSON.stringify({
         name: 'GAN Trading', short_name: 'GAN', start_url: '/pi', display: 'standalone',
