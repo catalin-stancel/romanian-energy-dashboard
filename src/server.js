@@ -756,7 +756,7 @@ const server = http.createServer(async (req, res) => {
     const json = (o) => send(200, 'application/json', JSON.stringify(o));
 
     // unauthenticated routes
-    if (url.pathname === '/health') return json({ ok: true, ts: new Date().toISOString() });
+    if (url.pathname === '/health') return json({ ok: true, ts: new Date().toISOString(), sid: process.env.RENDER_SERVICE_ID || null });
     if (url.pathname === '/login') {
       if (req.method === 'POST') {
         const { user, pass } = await readForm(req);
