@@ -1072,25 +1072,37 @@ function detailPage(date) {
 const senCache = {};
 async function liveSEN(date) {
   const c = senCache[date];
-  if (c && Date.now() - c.at < 15000) return c.map; // 15s — near-realtime for the Predict page
+  // 45s cache: SEN only updates ~10 min, and the host intermittently 404s server-to-server requests
+  // (esp. from cloud egress) — refetching too often just invites failures. Reuse only a NON-EMPTY fresh cache.
+  if (c && c.map.size && Date.now() - c.at < 45000) return c.map;
   const [y, mo, d] = date.split('-');
   const pre = '&_SENGrafic_WAR_SENGraficportlet_';
   const u = 'https://www.transelectrica.ro/widget/web/tel/sen-grafic?p_p_id=SENGrafic_WAR_SENGraficportlet&p_p_lifecycle=2&p_p_state=maximized&p_p_mode=view&p_p_cacheability=cacheLevelPage'
     + pre + 'random=' + Date.now()
     + pre + 'start_day=' + (+d) + pre + 'start_month=' + (+mo) + pre + 'start_year=' + y + pre + 'start_Hour=0' + pre + 'start_Minute=0'
     + pre + 'end_day=' + (+d) + pre + 'end_month=' + (+mo) + pre + 'end_year=' + y + pre + 'end_Hour=23' + pre + 'end_Minute=59';
-  const map = new Map();
-  const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0', 'X-Requested-With': 'XMLHttpRequest' } })).text();
-  for (const row of t.split('|')) {
-    const f = row.split(';');
-    if (f.length < 12) continue;
-    const m = /(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/.exec(f[0].trim());
-    if (!m) continue;
-    const isp = Math.floor((+m[4] * 60 + +m[5]) / 15) + 1; // RO-local minutes → ISP (last sample wins)
-    map.set(isp, { cons: +f[1], prod: +f[3], sold: +f[4] });
+  const HDRS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36', 'Accept': '*/*', 'X-Requested-With': 'XMLHttpRequest' };
+  // Retry the flaky SEN host; NEVER cache an empty result — fall back to last-good so Real columns don't blank.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch(u, { headers: HDRS });
+      if (r.ok) {
+        const t = await r.text();
+        const map = new Map();
+        for (const row of t.split('|')) {
+          const f = row.split(';');
+          if (f.length < 12) continue;
+          const m = /(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/.exec(f[0].trim());
+          if (!m) continue;
+          const isp = Math.floor((+m[4] * 60 + +m[5]) / 15) + 1; // RO-local minutes → ISP (last sample wins)
+          map.set(isp, { cons: +f[1], prod: +f[3], sold: +f[4] });
+        }
+        if (map.size) { senCache[date] = { at: Date.now(), map }; return map; }
+      }
+    } catch { /* fall through to retry */ }
+    if (attempt < 3) await new Promise((res) => setTimeout(res, 500));
   }
-  senCache[date] = { at: Date.now(), map };
-  return map;
+  return c ? c.map : new Map(); // all attempts failed → last-good (stale) data, else empty
 }
 
 // Validated real-value nowcast model (tool/realmodel.json, fit by train_real.js). Optional — page
