@@ -272,6 +272,20 @@ function computeBets(db, model, now, runAt) {
     (run_at, ts_utc, date_ro, isp, actionable, dir, qty, prob, exp_price, da_ref, da_ref_est, exp_edge, exp_revenue, model_version, tail_loss, reason)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
+  // Structural imbalance-vs-PZU spread per 3h block (trailing 120d): mean(imbalance price − PZU). This is
+  // the STABLE signal (both move together, so the spread survives even when levels swing on solar days),
+  // and it is base-rate-correct (uses realized prices, not a 50/50 quantile average). Negative = imbalance
+  // structurally below PZU → lean DEFICIT (over-sell PZU, buy back cheap). The validated D-1 edge.
+  const fromDate = new Date(now.getTime() - 120 * 86400000).toISOString().slice(0, 10);
+  const spreadByBlock = {};
+  for (const row of db.prepare(`
+    SELECT (s1.isp-1)/12 AS blk, AVG(s1.value - s2.value*?) AS sp, COUNT(*) n
+    FROM series s1 JOIN series s2 ON s1.ts_utc=s2.ts_utc
+    WHERE s1.series='damas_est_price_pos' AND s2.series='da_price' AND s1.date_ro >= ?
+    GROUP BY blk`).all(cfg.eur_ron, fromDate)) {
+    if (row.n >= 50) spreadByBlock[row.blk] = row.sp;
+  }
+
   let n = 0;
   db.exec('BEGIN');
   for (const r of rows) {
@@ -284,19 +298,24 @@ function computeBets(db, model, now, runAt) {
     else { daRef = pzuAvg.get(r.isp, r.date_ro, r.date_ro)?.v ?? 0; est = 1; }
     // EV-based sizing: bet whenever risk-adjusted expected value is positive; hold only
     // when the wrong-case tail loss is costly enough to eat the edge.
-    const p = r.prob_long; // P(system surplus -> low imbalance price)
+    // STRUCTURAL LEAN (validated 2026-06-17, see [[pzu-bidding]]): the day-specific imbalance-direction
+    // call (prob_long) is a coin-flip at the D-1 horizon and the old EV tilt was a NET DRAG vs a structural
+    // deficit lean (backtest 1.89M vs 3.43M). So the bet direction/size now comes from the STRUCTURAL
+    // imbalance-price-vs-PZU spread (tS/tD per block are the structural price levels), NOT prob_long.
+    // Confidence is the structural hit-rate (~60%, and ERODING — size modestly), not a day-specific signal.
     const block = Math.floor((r.isp - 1) / 12);
-    const tS = model.priceQuantiles[block + '|1']; // imbalance price distribution if system surplus
-    const tD = model.priceQuantiles[block + '|0']; // ... if system deficit
-    let dir, ev = 0, wrongProb = 0, tailLoss = 0;
-    if (tS && tD && p !== null) {
-      const evSurplus = p * (tS.p50 - daRef) + (1 - p) * (tD.p50 - daRef); // RON/MWh of a +1 MWh position
-      dir = evSurplus >= 0 ? 'surplus' : 'deficit';
-      ev = Math.abs(evSurplus);
-      wrongProb = dir === 'surplus' ? p : 1 - p; // surplus bet hurts when system is surplus (cheap)
-      // tail beyond the median wrong-case: the EV already prices the median loss; this guards
-      // only the surprise (spike/crash) part — "hold if a mistake is COSTLY", not merely possible
-      tailLoss = dir === 'surplus' ? Math.max(0, tS.p50 - tS.p10) : Math.max(0, tD.p90 - tD.p50);
+    const tS = model.priceQuantiles[block + '|1'];
+    const tD = model.priceQuantiles[block + '|0'];
+    const meanSpread = spreadByBlock[block]; // structural mean(imbalance price − PZU) for this block
+    let dir, ev = 0, wrongProb = 0.4, tailLoss = 0, expPrice = r.price_p50; // wrongProb 0.4 → ~60% structural conf
+    if (meanSpread !== undefined) {
+      dir = meanSpread >= 0 ? 'surplus' : 'deficit'; // imb below PZU (negative) → over-sell PZU & buy back cheap
+      ev = Math.abs(meanSpread);
+      expPrice = +(daRef + meanSpread).toFixed(2); // structural implied imbalance price for the day
+      if (tS && tD) tailLoss = dir === 'surplus' ? Math.max(0, tS.p50 - tS.p10) : Math.max(0, tD.p90 - tD.p50);
+    } else if (tS && tD) { // fallback if no structural spread for the block
+      const evSurplus = 0.5 * (tS.p50 + tD.p50) - daRef;
+      dir = evSurplus >= 0 ? 'surplus' : 'deficit'; ev = Math.abs(evSurplus);
     } else {
       dir = (r.price_p50 ?? daRef) >= daRef ? 'surplus' : 'deficit';
     }
@@ -306,7 +325,7 @@ function computeBets(db, model, now, runAt) {
     const qty = riskAdj >= 50 ? cfg.max_mwh_per_isp : cfg.min_mwh_per_isp;
     const reason = riskAdj >= 50 ? 'strong' : 'base';
     ins.run(runAt, r.ts_utc, r.date_ro, r.isp, r.actionable, dir, qty, +((1 - wrongProb)).toFixed(4),
-      r.price_p50, +daRef.toFixed(2), est, +ev.toFixed(2), +(qty * ev).toFixed(2), r.model_version,
+      expPrice, +daRef.toFixed(2), est, +ev.toFixed(2), +(qty * ev).toFixed(2), r.model_version,
       +tailLoss.toFixed(2), reason);
     n++;
   }

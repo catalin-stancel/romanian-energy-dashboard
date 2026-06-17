@@ -131,6 +131,12 @@ const FEATURE_NAMES = [
   'commit_stress',     // scheduled net export / forecast domestic surplus at the target interval
   'flow_dev_recent',   // physical − scheduled net export, last hour (border program deviation)
   'qnet_recent',       // activated up − down energy, last 45 min (which way the TSO is fighting)
+  // v3 pack: new DAMAS endpoints (2026-06-17)
+  'notif_net',         // notified production − consumption at target (FORWARD-looking; gated like commit)
+  'notif_prod',        // notified production level at target
+  'mp_up_recent',      // recent marginal aFRR up price (~25 min lag)
+  'mp_dn_recent',      // recent marginal aFRR down price
+  'contr_dn_recent',   // recent contracted down-reserve buffer
 ];
 
 // ctx = {maps, stacks, weatherIdx}; target = Date of ISP start (UTC); asOf = Date
@@ -206,6 +212,18 @@ function featuresFor(ctx, target, asOf) {
   const solarPrev = sameDay ? (get(m.ws_fc_cur_solar, tsPrev1h) ?? get(m.ws_fc_da_solar, tsPrev1h)) : get(m.ws_fc_da_solar, tsPrev1h);
   const solarRamp = solarNow !== null && solarPrev !== null ? solarNow - solarPrev : null;
 
+  // v3: new DAMAS endpoints. notif_* are notified schedules published ahead → forward-looking,
+  // but gated like commitments (not known at a D-1 06:00 long-horizon decision).
+  let notifNet = null, notifProd = null;
+  if (commitAvail) {
+    const np = get(m.damas_notif_prod, ts), nc = get(m.damas_notif_cons, ts);
+    notifProd = np;
+    if (np !== null && nc !== null) notifNet = np - nc;
+  }
+  const mpUp = recentMean(m.damas_mp_afrr_up, asOf, 4);
+  const mpDn = recentMean(m.damas_mp_afrr_down, asOf, 4);
+  const contrDn = recentMean(m.damas_contr_down, asOf, 4);
+
   return {
     names: FEATURE_NAMES,
     values: [
@@ -228,6 +246,7 @@ function featuresFor(ctx, target, asOf) {
       block === 5 ? 1 : 0, block === 6 ? 1 : 0, block === 7 ? 1 : 0,
       imb45 !== null && imb2h !== null ? imb45 - imb2h : null,
       windErr, solarErr, consErr, commitStress, flowDev, qnet,
+      notifNet, notifProd, mpUp, mpDn, contrDn,
     ],
     meta: { date, isp, ts },
   };
@@ -243,6 +262,8 @@ const SERIES_NEEDED = [
   'sched_RO_UA', 'sched_UA_RO', 'sched_RO_MD', 'sched_MD_RO',
   'flow_RO_HU', 'flow_HU_RO', 'flow_RO_BG', 'flow_BG_RO', 'flow_RO_RS', 'flow_RS_RO',
   'flow_RO_UA', 'flow_UA_RO', 'flow_RO_MD', 'flow_MD_RO',
+  // v3: new DAMAS endpoints
+  'damas_notif_prod', 'damas_notif_cons', 'damas_mp_afrr_up', 'damas_mp_afrr_down', 'damas_contr_down',
 ];
 
 function buildContext(db, fromIso) {

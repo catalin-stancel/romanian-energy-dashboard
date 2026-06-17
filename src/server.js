@@ -214,6 +214,10 @@ const NAV = (active, date, refreshSec, extras) => `
   <div class="nav">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
+    <a class="${active === 'damas' ? 'on' : ''}" href="/damas">DAMAS</a>
+    <a class="${active === 'system' ? 'on' : ''}" href="/system">System</a>
+    <a class="${active === 'detail' ? 'on' : ''}" href="/detail">Detail</a>
+    <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
     <a href="#" title="toggle dark/light theme" onclick="toggleTheme();return false">◐</a>
     <span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
@@ -223,6 +227,10 @@ const NAV = (active, date, refreshSec, extras) => `
   <div id="mainmenu" class="menu">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
+    <a class="${active === 'damas' ? 'on' : ''}" href="/damas">DAMAS</a>
+    <a class="${active === 'system' ? 'on' : ''}" href="/system">System</a>
+    <a class="${active === 'detail' ? 'on' : ''}" href="/detail">Detail</a>
+    <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
     <div class="menusep"></div>
     <a href="#" onclick="event.stopPropagation();var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
@@ -386,6 +394,12 @@ button:active{transform:scale(0.98)}
 #status{font-size:11px;color:var(--pos);margin-left:10px;font-family:var(--font-mono)}
 h2{margin:24px 0 6px;font-family:var(--font-display);font-weight:700;font-size:18px;letter-spacing:-0.01em;color:var(--fg)}
 small{color:var(--fg-muted)}
+.help{cursor:help;color:var(--fg-muted);font-weight:400;font-size:11px;position:relative;display:inline-block;outline:none}
+.help .tip{display:none;position:absolute;top:17px;left:50%;transform:translateX(-50%);z-index:90;width:200px;
+  background:var(--bg-surface);color:var(--fg);border:1px solid var(--border-2);border-radius:8px;padding:8px 11px;
+  font:11px/1.45 var(--font-body);font-weight:400;text-align:left;letter-spacing:0;white-space:normal;
+  box-shadow:0 8px 24px rgba(0,0,0,0.45)}
+.help:hover .tip,.help.show .tip{display:block}
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .userchip{font:11px var(--font-mono);color:var(--fg-muted);margin-left:10px}
 .userchip a{color:var(--fg-muted)}
@@ -860,6 +874,386 @@ function widgetData() {
   };
 }
 
+// ---- DAMAS realtime page: every field the Transelectrica DAMAS II public API returns ----
+// Pure live fetch (independent of the pull job), 55s server-side cache. Renders like the PI
+// page: all 96 intervals chronological, current=yellow ▶, last-settled=green ●, window rails.
+const DAMAS_BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/';
+const DAMAS_FIELDS = [
+  { key: 'estimatedSystemImbalance', label: 'Imbalance', unit: 'MWh' },
+  { key: 'estimatedPricePositiveImbalance', label: 'Surplus price', unit: 'RON' },
+  { key: 'estimatedPriceNegativeImbalance', label: 'Deficit price', unit: 'RON' },
+  { key: 'realizedConsumption', label: 'Consumption', unit: 'MWh' },
+  { key: 'sumQup', label: 'Act ↑', unit: 'MWh' },
+  { key: 'sumQdn', label: 'Act ↓', unit: 'MWh' },
+  { key: 'sumQupPup', label: '↑ value', unit: 'RON' },
+  { key: 'sumQdownPdn', label: '↓ value', unit: 'RON' },
+  { key: 'fcr', label: 'FCR', unit: 'MWh' },
+  { key: 'aFRR_Up', label: 'aFRR ↑', unit: 'MWh' },
+  { key: 'aFRR_Down', label: 'aFRR ↓', unit: 'MWh' },
+  { key: 'mFRR_Up', label: 'mFRR ↑', unit: 'MWh' },
+  { key: 'mFRR_Down', label: 'mFRR ↓', unit: 'MWh' },
+  { key: 'rr_Up', label: 'RR ↑', unit: 'MWh' },
+  { key: 'rr_Down', label: 'RR ↓', unit: 'MWh' },
+  { key: 'imbalanceNettingImport', label: 'Net imp', unit: 'MWh' },
+  { key: 'imbalanceNettingExport', label: 'Net exp', unit: 'MWh' },
+];
+const damasLiveCache = { at: 0, date: null, rows: null };
+async function liveDamasFull(date) {
+  if (damasLiveCache.date === date && Date.now() - damasLiveCache.at < 55000) return damasLiveCache.rows;
+  const from = new Date(new Date(date + 'T00:00:00Z').getTime() - 86400000).toISOString();
+  const to = new Date(new Date(date + 'T00:00:00Z').getTime() + 86400000).toISOString();
+  const u = new URL(DAMAS_BASE + 'publicReport/estimatedImbalancePrices');
+  u.searchParams.set('timeInterval', JSON.stringify({ from, to }));
+  const r = await fetch(u);
+  if (!r.ok) throw new Error('DAMAS ' + r.status);
+  const all = (await r.json()).itemList || [];
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+  const out = [];
+  for (const it of all) {
+    const ri = roDateIsp(new Date(it.timeInterval.from));
+    if (ri.date !== date) continue;
+    const row = { isp: ri.isp, ts: it.timeInterval.from };
+    for (const f of DAMAS_FIELDS) row[f.key] = num(it[f.key]);
+    if (row.estimatedSystemImbalance !== null || row.estimatedPricePositiveImbalance !== null) out.push(row);
+  }
+  out.sort((a, b) => a.isp - b.isp);
+  damasLiveCache.at = Date.now(); damasLiveCache.date = date; damasLiveCache.rows = out;
+  return out;
+}
+
+async function damasPage(date) {
+  let rows = null, err = null;
+  try { rows = await liveDamasFull(date); } catch (e) { err = e.message; }
+  const byIsp = new Map((rows || []).map((r) => [r.isp, r]));
+  const cfg = loadConfig();
+  const [wh0, wh1] = cfg.trade_window_cet || [7, 22];
+  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4;
+  const nowInfo = roDateIsp(new Date());
+  const nowMs = Date.now();
+  const fmt = (v) => (v === null || v === undefined ? '' : Math.round(v).toLocaleString('en-US'));
+  let lastRealIsp = null;
+  for (const { isp, ts } of dayTimestamps(date)) {
+    if (new Date(ts).getTime() + 900000 <= nowMs && byIsp.has(isp)) lastRealIsp = isp;
+  }
+  const head = DAMAS_FIELDS.map((f) => `<th title="${f.key} [${f.unit}]">${f.label}<br><small>${f.unit}</small></th>`).join('');
+  const body = dayTimestamps(date).map(({ isp, ts }) => {
+    const tsMs = new Date(ts).getTime();
+    const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
+    const r = byIsp.get(isp);
+    const cells = DAMAS_FIELDS.map((f) => {
+      const v = r ? r[f.key] : null;
+      if (f.key === 'estimatedSystemImbalance') {
+        return `<td>${v === null || v === undefined ? '' : dirIcon(v > 0) + ' ' + fmt(Math.abs(v))}</td>`;
+      }
+      return `<td>${fmt(v)}</td>`;
+    }).join('');
+    const price = r ? r.estimatedPricePositiveImbalance : null;
+    const lastClass = price !== null && price < 0 ? 'lastneg' : 'lastpos';
+    const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
+    return `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass}">
+      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>${cells}</tr>`;
+  }).join('\n');
+  const extras = `<span class="pill2"><small>live</small> ${byIsp.size} settled</span>${colPicker('cols-damas')}`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>DAMAS ${date}</title>${STYLE}</head><body>
+${NAV('damas', date, { left: 60, period: 60 }, extras)}<div class="content">
+${err ? `<p class="meta" style="color:var(--neg)">DAMAS fetch failed: ${err} — retrying on next refresh.</p>` : ''}
+<table><tr><th>Int</th><th>CET</th>${head}</tr>
+${body}</table></div></body></html>`;
+}
+
+// ---- generic multi-endpoint DAMAS report pages (System = top-3, Detail = #4-6) ----
+const reportCache = {};
+async function liveReport(cmd, date) {
+  const key = cmd + '|' + date;
+  const c = reportCache[key];
+  if (c && Date.now() - c.at < 55000) return c.map;
+  const from = new Date(new Date(date + 'T00:00:00Z').getTime() - 86400000).toISOString();
+  const to = new Date(new Date(date + 'T00:00:00Z').getTime() + 86400000).toISOString();
+  const u = new URL(DAMAS_BASE + 'publicReport/' + cmd);
+  u.searchParams.set('timeInterval', JSON.stringify({ from, to }));
+  const all = (await (await fetch(u)).json()).itemList || [];
+  const map = new Map();
+  for (const it of all) { const ri = roDateIsp(new Date(it.timeInterval.from)); if (ri.date === date) map.set(ri.isp, it); }
+  reportCache[key] = { at: Date.now(), map };
+  return map;
+}
+const rnum = (v) => { const n = Number(v); return v !== null && v !== undefined && v !== 'N/A' && Number.isFinite(n) ? n : null; };
+const rfmt = (v) => (v === null ? '' : Math.round(v).toLocaleString('en-US'));
+const gv = (cmd, field) => (m, i) => { const r = m[cmd] && m[cmd].get(i); return r ? rfmt(rnum(r[field])) : ''; };
+
+async function reportPage(active, title, date, cmds, gate, cols) {
+  const maps = {}; let err = null;
+  await Promise.all(cmds.map(async (c) => { try { maps[c] = await liveReport(c, date); } catch (e) { err = e.message; maps[c] = new Map(); } }));
+  const cfg = loadConfig(); const [wh0, wh1] = cfg.trade_window_cet || [7, 22];
+  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4;
+  const nowInfo = roDateIsp(new Date()); const nowMs = Date.now();
+  let lastRealIsp = null;
+  for (const { isp, ts } of dayTimestamps(date)) {
+    const row = maps[gate.cmd] && maps[gate.cmd].get(isp);
+    if (new Date(ts).getTime() + 900000 <= nowMs && row && rnum(row[gate.field]) !== null) lastRealIsp = isp;
+  }
+  const head = cols.map((c) => `<th>${c.h}${c.u ? `<br><small>${c.u}</small>` : ''}${c.help ? ` <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span>` : ''}</th>`).join('');
+  const body = dayTimestamps(date).map(({ isp, ts }) => {
+    const tsMs = new Date(ts).getTime();
+    const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
+    const cells = cols.map((c) => `<td>${c.f(maps, isp)}</td>`).join('');
+    const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
+    return `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? 'lastpos' : ''}${winClass}"><td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>${cells}</tr>`;
+  }).join('\n');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>${title} ${date}</title>${STYLE}</head><body>
+${NAV(active, date, { left: 60, period: 60 }, colPicker('cols-' + active))}<div class="content">
+${err ? `<p class="meta" style="color:var(--neg)">fetch issue: ${err}</p>` : ''}
+<table><tr><th>Int</th><th>CET</th>${head}</tr>
+${body}</table></div>
+<script>document.addEventListener('click',function(e){var h=e.target.closest('.help');
+  document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
+  if(h){h.classList.toggle('show');e.preventDefault();}});</script>
+</body></html>`;
+}
+
+function systemPage(date) {
+  const E = 'estimatedPowerSystemImbalance', M = 'marginalPricesOverview', G = 'generationSchedules';
+  const cols = [
+    { h: 'Imbalance', u: 'MWh', help: 'Estimated total system imbalance for the interval. S (blue) = surplus, system long, prices low/negative. D (orange) = deficit, system short, prices high.', f: (m, i) => { const r = m[E] && m[E].get(i); const v = r ? rnum(r.estimatedSystemImbalance) : null; return v === null ? '' : dirIcon(v > 0) + ' ' + rfmt(Math.abs(v)); } },
+    { h: 'Dev IN', u: 'MWh', help: 'Unintended deviation arising inside Romania’s control area (the domestic contribution to the imbalance).', f: gv(E, 'estimatedUnintendedDeviationINArea') },
+    { h: 'Dev OUT', u: 'MWh', help: 'Deviation attributed outside the area, netted in via cross-border imbalance netting (IGCC/PICASSO).', f: gv(E, 'estimatedUnintendedDeviationOUTArea') },
+    { h: 'Contr ↑', u: 'MWh', help: 'Contracted upward balancing reserve available this interval — the buffer the TSO can call before up-prices spike. Low buffer + deficit = spike risk.', f: gv(E, 'contractedBMVolumeUp') },
+    { h: 'Contr ↓', u: 'MWh', help: 'Contracted downward reserve available — buffer absorbing surplus before prices crash negative. Low buffer + surplus = negative-price risk.', f: gv(E, 'contractedBMVolumeDown') },
+    { h: 'Act.res', u: 'MWh', help: 'Net reserve actually activated. Positive = net up (system was short), negative = net down (system was long).', f: gv(E, 'activatedReserve') },
+    { h: 'aFRR↑', u: 'RON', help: 'Marginal price of activated automatic FRR up-energy [RON/MWh] — fast secondary reserve, called when the system is short.', f: gv(M, 'aFRR_Up') },
+    { h: 'aFRR↓', u: 'RON', help: 'Marginal price of activated automatic FRR down-energy — called when the system is long.', f: gv(M, 'aFRR_Down') },
+    { h: 'mFRR↑', u: 'RON', help: 'Marginal price of activated manual FRR up-energy — slower tertiary reserve for larger/sustained deficits.', f: gv(M, 'mFRR_Up') },
+    { h: 'mFRR↓', u: 'RON', help: 'Marginal price of activated manual FRR down-energy — for larger/sustained surpluses.', f: gv(M, 'mFRR_Down') },
+    { h: 'RR↑', u: 'RON', help: 'Marginal price of activated Replacement Reserve up-energy (slowest reserve tier).', f: gv(M, 'rr_Up') },
+    { h: 'RR↓', u: 'RON', help: 'Marginal price of activated Replacement Reserve down-energy.', f: gv(M, 'rr_Down') },
+    { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) production by balance-responsible parties — published ahead. The generation plan the system must hold; realized minus this is the imbalance.', f: gv(G, 'brpsProduction') },
+    { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the demand plan, published ahead.', f: gv(G, 'brpsConsumption') },
+    { h: 'NonDU prod', u: 'MW', help: 'Production from non-dispatchable units (must-run / renewables not under central dispatch).', f: gv(G, 'nonDuProduction') },
+  ];
+  return reportPage('system', 'System', date, [E, M, G], { cmd: E, field: 'estimatedSystemImbalance' }, cols);
+}
+
+function detailPage(date) {
+  const C = 'dailyConsumptionOverview', A = 'activatedBalancingEnergyOverview', S = 'scheduledExchanges';
+  // 'commercial' = the day-ahead+intraday nomination rollup; use it directly (summing all
+  // timeframe leaves double-counts commercial with its own DA/ID components).
+  const schedVal = (o) => { if (!o || typeof o !== 'object') return null; let v = rnum(o.commercial); if (v === null) { const da = rnum(o.dayAhead), id = rnum(o.intraday); if (da !== null || id !== null) v = (da ?? 0) + (id ?? 0); } return v; };
+  const borderNet = (pair) => (m, i) => {
+    const r = m[S] && m[S].get(i); if (!r) return '';
+    const exp = schedVal(r['ro' + pair]), imp = schedVal(r[pair + 'ro']);
+    if (exp === null && imp === null) return '';
+    const net = (exp ?? 0) - (imp ?? 0);
+    return `${net >= 0 ? '↑' : '↓'}${Math.round(Math.abs(net))}`;
+  };
+  const cols = [
+    { h: 'Cons fc', u: 'MW', help: 'Gross forecast consumption for the interval (the demand the TSO expected).', f: gv(C, 'grossForecastConsumption') },
+    { h: 'Cons real', u: 'MW', help: 'Gross realized (metered) consumption.', f: gv(C, 'grossRealizedConsumption') },
+    { h: 'Cons err', u: 'MW', help: 'Realized minus forecast consumption. Positive (green) = demand higher than expected, which pushes the system short (toward deficit); negative pushes it long.', f: (m, i) => { const r = m[C] && m[C].get(i); if (!r) return ''; const a = rnum(r.grossRealizedConsumption), b = rnum(r.grossForecastConsumption); return a === null || b === null ? '' : `<span class="${a - b >= 0 ? 'pos' : 'neg'}">${rfmt(a - b)}</span>`; } },
+    { h: 'aFRR↑', u: 'MWh', help: 'Activated automatic FRR up-energy volume (how much fast secondary reserve was called up this interval).', f: gv(A, 'aFRR_Up') },
+    { h: 'aFRR↓', u: 'MWh', help: 'Activated automatic FRR down-energy volume.', f: gv(A, 'aFRR_Down') },
+    { h: 'mFRR↑', u: 'MWh', help: 'Activated manual FRR up-energy volume (slower tertiary reserve).', f: gv(A, 'mFRR_Up') },
+    { h: 'mFRR↓', u: 'MWh', help: 'Activated manual FRR down-energy volume.', f: gv(A, 'mFRR_Down') },
+    { h: 'RR↑', u: 'MWh', help: 'Activated Replacement Reserve up-energy volume (slowest tier).', f: gv(A, 'rr_Up') },
+    { h: 'RR↓', u: 'MWh', help: 'Activated Replacement Reserve down-energy volume.', f: gv(A, 'rr_Down') },
+    { h: 'HU', u: 'MW', help: 'Net scheduled cross-border exchange with Hungary. ↑ = export from Romania, ↓ = import. Heavy committed exports tighten the system and raise spike risk if generation disappoints.', f: borderNet('hu') },
+    { h: 'BG', u: 'MW', help: 'Net scheduled cross-border exchange with Bulgaria. ↑ = export, ↓ = import.', f: borderNet('bg') },
+    { h: 'RS', u: 'MW', help: 'Net scheduled cross-border exchange with Serbia. ↑ = export, ↓ = import.', f: borderNet('rs') },
+    { h: 'UA', u: 'MW', help: 'Net scheduled cross-border exchange with Ukraine. ↑ = export, ↓ = import.', f: borderNet('ua') },
+    { h: 'MD', u: 'MW', help: 'Net scheduled cross-border exchange with Moldova. ↑ = export, ↓ = import.', f: borderNet('md') },
+  ];
+  return reportPage('detail', 'Detail', date, [C, A, S], { cmd: C, field: 'grossForecastConsumption' }, cols);
+}
+
+// ---- Transelectrica live SEN feed (real-time national prod/cons/balance + per-source) ----
+// Hidden Liferay resource endpoint behind the "Stare SEN in timp real" page. Comma/pipe/semicolon
+// delimited: rows split by '|', fields by ';' = time;Consum;AvgConsum;Productie;Sold;Coal;Hydro;
+// Gas;Nuclear;Wind;Solar;Biomass. ~10-min cadence, fresh to the minute, date-range capable.
+// Replaces ENTSO-E gen_actual (which lagged ~1h and arrived with incomplete plant types).
+const senCache = {};
+async function liveSEN(date) {
+  const c = senCache[date];
+  if (c && Date.now() - c.at < 60000) return c.map;
+  const [y, mo, d] = date.split('-');
+  const pre = '&_SENGrafic_WAR_SENGraficportlet_';
+  const u = 'https://www.transelectrica.ro/widget/web/tel/sen-grafic?p_p_id=SENGrafic_WAR_SENGraficportlet&p_p_lifecycle=2&p_p_state=maximized&p_p_mode=view&p_p_cacheability=cacheLevelPage'
+    + pre + 'random=' + Date.now()
+    + pre + 'start_day=' + (+d) + pre + 'start_month=' + (+mo) + pre + 'start_year=' + y + pre + 'start_Hour=0' + pre + 'start_Minute=0'
+    + pre + 'end_day=' + (+d) + pre + 'end_month=' + (+mo) + pre + 'end_year=' + y + pre + 'end_Hour=23' + pre + 'end_Minute=59';
+  const map = new Map();
+  const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0', 'X-Requested-With': 'XMLHttpRequest' } })).text();
+  for (const row of t.split('|')) {
+    const f = row.split(';');
+    if (f.length < 12) continue;
+    const m = /(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/.exec(f[0].trim());
+    if (!m) continue;
+    const isp = Math.floor((+m[4] * 60 + +m[5]) / 15) + 1; // RO-local minutes → ISP (last sample wins)
+    map.set(isp, { cons: +f[1], prod: +f[3], sold: +f[4] });
+  }
+  senCache[date] = { at: Date.now(), map };
+  return map;
+}
+
+// Validated real-value nowcast model (tool/realmodel.json, fit by train_real.js). Optional — page
+// degrades gracefully (no predictions) if absent.
+const REALMODEL = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'realmodel.json'), 'utf8')); } catch { return null; } })();
+
+// Validated PZU day-ahead price-curve model (tool/pzumodel.json, fit by train_pzu.js). Used for the
+// revised /pzu page: forecast the price curve (for ranking + battery dispatch), NOT to tilt on imbalance
+// (proven a coin-flip / net drag at D-1). See memory: pzu-bidding.
+const PZUMODEL = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'pzumodel.json'), 'utf8')); } catch { return null; } })();
+
+// Forecast the PZU price curve (RON/MWh) for `date` from day-ahead-known DB features + battery dispatch
+// hint (charge cheapest quartile of the day, discharge most expensive). Returns {price:Map, battery:Map, bucketSpread}.
+function pzuForecast(date) {
+  const out = { price: new Map(), battery: new Map(), bucketSpread: PZUMODEL ? PZUMODEL.bucketSpread : null };
+  if (!PZUMODEL) return out;
+  const cfg = loadConfig(); const eurRon = cfg.eur_ron || PZUMODEL.eur_ron;
+  const da = new Map(db.prepare("SELECT date_ro,isp,value FROM series WHERE series='da_price' AND date_ro>=? AND date_ro<=?")
+    .all(addDays(date, -7), date).map((r) => [r.date_ro + '|' + r.isp, r.value]));
+  const ser = (s) => new Map(db.prepare('SELECT isp,value FROM series WHERE series=? AND date_ro=?').all(s, date).map((r) => [r.isp, r.value]));
+  const solF = ser('ws_fc_da_solar'), winF = ser('ws_fc_da_wind_onshore'), loadF = ser('load_fc_da');
+  const { coef, mu, sd } = PZUMODEL; const K = coef.length;
+  const dow = new Date(date + 'T12:00:00Z').getUTCDay(); const ma = 2 * Math.PI * (+date.slice(5, 7)) / 12;
+  const vals = [];
+  for (let isp = 1; isp <= 96; isp++) {
+    const a = 2 * Math.PI * isp / 96;
+    const lf = loadF.get(isp), sf = solF.get(isp), wf = winF.get(isp);
+    const netload = (lf != null && sf != null && wf != null) ? lf - sf - wf : null;
+    const lag24 = da.get(addDays(date, -1) + '|' + isp), lag168 = da.get(addDays(date, -7) + '|' + isp);
+    let s = 0, n = 0; for (let j = 1; j <= 7; j++) { const v = da.get(addDays(date, -j) + '|' + isp); if (v != null) { s += v; n++; } }
+    const avg7 = n ? s / n : null;
+    const x = [1, Math.sin(a), Math.cos(a), Math.sin(2 * a), Math.cos(2 * a), (dow === 0 || dow === 6) ? 1 : 0,
+      Math.sin(ma), Math.cos(ma), netload, lf ?? null, sf ?? null, wf ?? null, lag24 ?? null, lag168 ?? null, avg7];
+    if (x[12] == null && x[13] == null && x[14] == null) continue; // no price history at all → can't forecast
+    let z = 0; for (let j = 0; j < K; j++) { const xv = j === 0 ? 1 : (Number.isFinite(x[j]) ? (x[j] - mu[j]) / sd[j] : 0); z += coef[j] * xv; }
+    const ron = z * eurRon; out.price.set(isp, ron); vals.push(ron);
+  }
+  if (vals.length >= 8) {
+    const sorted = [...vals].sort((a, b) => a - b); const q = (p) => sorted[Math.floor(p * (sorted.length - 1))];
+    const lo = q(0.25), hi = q(0.75);
+    for (const [isp, v] of out.price) out.battery.set(isp, v <= lo ? 'charge' : v >= hi ? 'discharge' : null);
+  }
+  return out;
+}
+
+// ---- Predict page: trader-facing real-vs-notified view (imbalance, prod, cons, cross-border) ----
+async function predictPage(date) {
+  const SEN = await liveSEN(date).catch(() => new Map());
+  const [P, E, G, C, X] = await Promise.all(
+    ['estimatedImbalancePrices', 'estimatedPowerSystemImbalance', 'generationSchedules', 'dailyConsumptionOverview', 'scheduledExchanges']
+      .map((c) => liveReport(c, date).catch(() => new Map())),
+  );
+  const cfg = loadConfig(); const [wh0, wh1] = cfg.trade_window_cet || [7, 22];
+  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4;
+  const nowInfo = roDateIsp(new Date()); const nowMs = Date.now();
+  const schedVal = (o) => { if (!o || typeof o !== 'object') return null; let v = rnum(o.commercial); if (v === null) { const da = rnum(o.dayAhead), id = rnum(o.intraday); if (da !== null || id !== null) v = (da ?? 0) + (id ?? 0); } return v; };
+  const notifXB = (x) => { if (!x) return null; let net = 0, any = false; for (const p of ['hu', 'bg', 'rs', 'ua', 'md']) { const e = schedVal(x['ro' + p]), i = schedVal(x[p + 'ro']); if (e !== null) { net += e; any = true; } if (i !== null) { net -= i; any = true; } } return any ? net : null; };
+  const fmt = (v) => (v === null || v === undefined ? '' : Math.round(v).toLocaleString('en-US'));
+  const dlt = (v) => (v === null ? '' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span>`);
+  const arrow = (v) => (v === null ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
+
+  let lastRealIsp = null;
+  for (const { isp, ts } of dayTimestamps(date)) { const r = P.get(isp); if (new Date(ts).getTime() + 900000 <= nowMs && r && rnum(r.estimatedSystemImbalance) !== null) lastRealIsp = isp; }
+
+  // --- Nowcast prediction of real prod/cons for upcoming (not-yet-settled) intervals ---
+  // pred = notified + phi[h]*recentDev, recentDev = mean(real-notified) over the last 3 settled
+  // intervals. Self-corrects the SEN/DAMAS basis offset (re-centers on today's gap). See train_real.js.
+  const obs = {};
+  for (const { isp } of dayTimestamps(date)) {
+    const s = SEN.get(isp), gg = G.get(isp); if (!s || !gg) continue;
+    const np = rnum(gg.brpsProduction), nc = rnum(gg.brpsConsumption);
+    obs[isp] = { prod: np !== null ? s.prod - np : null, cons: nc !== null ? s.cons - nc : null };
+  }
+  const recentDev = (which) => {
+    if (lastRealIsp === null) return null;
+    const v = [];
+    for (let i = lastRealIsp; i > lastRealIsp - 6 && v.length < 3; i--) { const o = obs[i]; if (o && o[which] !== null && o[which] !== undefined) v.push(o[which]); }
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  };
+  const rdev = { prod: REALMODEL ? recentDev('prod') : null, cons: REALMODEL ? recentDev('cons') : null };
+  const predReal = (which, isp, notif) => {
+    if (!REALMODEL || notif === null || lastRealIsp === null || isp <= lastRealIsp || rdev[which] === null) return null;
+    const m = REALMODEL[which]; const h = Math.min(isp - lastRealIsp, m.phi.length); const i = h - 1;
+    const pt = notif + m.phi[i] * rdev[which];
+    return { pt, lo: pt + m.p10[i], hi: pt + m.p90[i] };
+  };
+  const predCell = (pr) => (pr === null ? ''
+    : `<span style="font-style:italic;opacity:.7" title="model nowcast · 80% CI ${fmt(pr.lo)}–${fmt(pr.hi)} MW">~${fmt(pr.pt)} <small>±${Math.round((pr.hi - pr.lo) / 2)}</small></span>`);
+
+  // Predicted imbalance for upcoming intervals: from the imbalance's OWN persistence (alpha+phi*recentImb).
+  // prod/cons/exports were tested as predictors and add ~0 — the DAMAS imbalance is a settlement-perimeter
+  // quantity, not the metered balance (see test_imb_components.js). ~78% next-interval sign accuracy.
+  const recentImb = (() => {
+    if (lastRealIsp === null) return null;
+    const v = [];
+    for (let i = lastRealIsp; i > lastRealIsp - 6 && v.length < 3; i--) { const r = P.get(i); const x = r ? rnum(r.estimatedSystemImbalance) : null; if (x !== null) v.push(x); }
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  })();
+  // The imbalance has NO notified anchor, so a point forecast mean-reverts to ~0 at long horizon
+  // (a flat, misleading line). It is only persistence-forecastable for ~2h; blank it beyond IMB_HMAX.
+  const IMB_HMAX = 8; // ~2h: sign skill ~78% (next interval) fading to ~64% by here, then unforecastable
+  const predImb = (isp) => {
+    const m = REALMODEL && REALMODEL.imb;
+    if (!m || lastRealIsp === null || isp <= lastRealIsp || recentImb === null || isp - lastRealIsp > IMB_HMAX) return null;
+    const h = isp - lastRealIsp; const i = h - 1;
+    const pt = m.alpha[i] + m.phi[i] * recentImb;
+    return { pt, lo: pt + m.p10[i], hi: pt + m.p90[i] };
+  };
+  const sd = (v) => (v >= 0 ? 'S' : 'D') + ' ' + fmt(Math.abs(v));
+  const predImbCell = (pr) => (pr === null ? ''
+    : `<span style="font-style:italic;opacity:.75" title="model nowcast (imbalance persistence) · 80% CI ${sd(pr.lo)} … ${sd(pr.hi)} MWh${pr.lo < 0 && pr.hi > 0 ? ' — band crosses zero → likely flip / low confidence' : ''}">${dirIcon(pr.pt > 0)} ~${fmt(Math.abs(pr.pt))} <small>±${Math.round((pr.hi - pr.lo) / 2)}</small></span>`);
+
+  const COLS = [
+    { h: 'Imbalance', u: 'MWh', help: 'Estimated system imbalance. S (blue) = surplus / system long → low or negative price. D (orange) = deficit / system short → high price. The model nowcast (~italic, ±80% band) is shown ONLY for the next ~2h — that is the limit of what persistence can forecast (~78% next-interval sign, ~64% by 2h). It is deliberately blank further out: the intraday imbalance path is effectively unforecastable, and a point forecast there just collapses to a flat ~0 line (misleading). ± larger than the value, or a band crossing S↔D on hover, means low confidence / likely flip. NOTE: prod/cons/exports were tested as predictors and add nothing — the imbalance is a settlement-perimeter quantity, not the metered prod−cons−export balance.' },
+    { h: 'Price', u: 'RON', help: 'Estimated imbalance price for the interval [RON/MWh].' },
+    { h: 'Real prod', u: 'MW', help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals show the model nowcast (~italic, hover for 80% band): notified + persistence of today’s real−notified gap. Validated ~35% error cut vs trusting the schedule.' },
+    { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, published a day ahead. NOTE: notified production sits on a higher basis than SEN metered (~several hundred MW), so read Prod Δ as a TREND, not an exact shortfall.' },
+    { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price).' },
+    { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute). Upcoming intervals show the model nowcast (~italic, hover for 80% band): notified + persistence of today’s real−notified gap. Validated ~25-30% error cut vs trusting the schedule.' },
+    { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the demand plan.' },
+    { h: 'Cons Δ', u: 'MW', help: 'Real − Notified consumption (may carry a basis offset — read the movement). Rising = demand gaining on plan → pushes the system SHORT (deficit, higher price).' },
+    { h: 'Real X-B', u: 'MW', help: 'Live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. ≈ cross-border exchange (before grid losses).' },
+    { h: 'Notif X-B', u: 'MW', help: 'Notified (commercial) cross-border schedule. ↑ = export, ↓ = import.' },
+    { h: 'X-B Δ', u: 'MW', help: 'Real − Notified cross-border. More export than planned drains supply → pushes the system SHORT.' },
+    { h: 'Contr ↓', u: 'MWh', help: 'Contracted downward-reserve buffer this interval. Low buffer while the system is long = negative-price risk.' },
+  ];
+  const head = COLS.map((c) => `<th>${c.h}<br><small>${c.u}</small> <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span></th>`).join('');
+
+  const body = dayTimestamps(date).map(({ isp, ts }) => {
+    const tsMs = new Date(ts).getTime();
+    const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
+    const p = P.get(isp), g = G.get(isp), c = C.get(isp), x = X.get(isp), e = E.get(isp);
+    const imb = p ? rnum(p.estimatedSystemImbalance) : null;
+    const price = p ? rnum(p.estimatedPricePositiveImbalance) : null;
+    const sen = SEN.get(isp);
+    const realProd = sen ? sen.prod : null;
+    const notifProd = g ? rnum(g.brpsProduction) : null;
+    const realCons = sen ? sen.cons : null;
+    const notifCons = g ? rnum(g.brpsConsumption) : null;
+    const rxb = sen ? -sen.sold : null, nxb = notifXB(x); // SEN sold = cons−prod; −sold = net export
+    const lastClass = price !== null && price < 0 ? 'lastneg' : 'lastpos';
+    const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
+    return `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass}">
+      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>
+      <td>${imb !== null ? dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb)) : predImbCell(predImb(isp))}</td>
+      <td>${fmt(price)}</td>
+      <td>${realProd !== null ? fmt(realProd) : predCell(predReal('prod', isp, notifProd))}</td><td>${fmt(notifProd)}</td><td>${dlt(realProd !== null && notifProd !== null ? realProd - notifProd : null)}</td>
+      <td>${realCons !== null ? fmt(realCons) : predCell(predReal('cons', isp, notifCons))}</td><td>${fmt(notifCons)}</td><td>${dlt(realCons !== null && notifCons !== null ? realCons - notifCons : null)}</td>
+      <td>${arrow(rxb)}</td><td>${arrow(nxb)}</td><td>${dlt(rxb !== null && nxb !== null ? rxb - nxb : null)}</td>
+      <td>${fmt(e ? rnum(e.contractedBMVolumeDown) : null)}</td>
+    </tr>`;
+  }).join('\n');
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
+${NAV('predict', date, { left: 60, period: 60 }, colPicker('cols-predict'))}<div class="content">
+<table><tr><th>Int</th><th>CET</th>${head}</tr>
+${body}</table></div>
+<script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
+  document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
+  if(h){h.classList.toggle('show');ev.preventDefault();}});</script>
+</body></html>`;
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     let b = '';
@@ -996,6 +1390,11 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/pzu') return json(pzuData(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pzu' || url.pathname === '/') return send(200, 'text/html', pzuPage(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pi') return send(200, 'text/html', piPage(url.searchParams.get('date') || today));
+    if (url.pathname === '/damas') return send(200, 'text/html', await damasPage(url.searchParams.get('date') || today));
+    if (url.pathname === '/api/damas') return json(await liveDamasFull(url.searchParams.get('date') || today));
+    if (url.pathname === '/system') return send(200, 'text/html', await systemPage(url.searchParams.get('date') || today));
+    if (url.pathname === '/detail') return send(200, 'text/html', await detailPage(url.searchParams.get('date') || today));
+    if (url.pathname === '/predict') return send(200, 'text/html', await predictPage(url.searchParams.get('date') || today));
     if (url.pathname === '/perf') return send(200, 'text/html', perfPage());
     send(404, 'text/plain', 'not found');
   } catch (e) {
