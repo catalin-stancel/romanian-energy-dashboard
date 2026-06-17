@@ -966,7 +966,7 @@ const reportCache = {};
 async function liveReport(cmd, date) {
   const key = cmd + '|' + date;
   const c = reportCache[key];
-  if (c && Date.now() - c.at < 55000) return c.map;
+  if (c && Date.now() - c.at < 15000) return c.map; // 15s — near-realtime for the Predict page
   const from = new Date(new Date(date + 'T00:00:00Z').getTime() - 86400000).toISOString();
   const to = new Date(new Date(date + 'T00:00:00Z').getTime() + 86400000).toISOString();
   const u = new URL(DAMAS_BASE + 'publicReport/' + cmd);
@@ -1072,7 +1072,7 @@ function detailPage(date) {
 const senCache = {};
 async function liveSEN(date) {
   const c = senCache[date];
-  if (c && Date.now() - c.at < 60000) return c.map;
+  if (c && Date.now() - c.at < 15000) return c.map; // 15s — near-realtime for the Predict page
   const [y, mo, d] = date.split('-');
   const pre = '&_SENGrafic_WAR_SENGraficportlet_';
   const u = 'https://www.transelectrica.ro/widget/web/tel/sen-grafic?p_p_id=SENGrafic_WAR_SENGraficportlet&p_p_lifecycle=2&p_p_state=maximized&p_p_mode=view&p_p_cacheability=cacheLevelPage'
@@ -1148,6 +1148,8 @@ async function predictPage(date) {
   const nowInfo = roDateIsp(new Date()); const nowMs = Date.now();
   const schedVal = (o) => { if (!o || typeof o !== 'object') return null; let v = rnum(o.commercial); if (v === null) { const da = rnum(o.dayAhead), id = rnum(o.intraday); if (da !== null || id !== null) v = (da ?? 0) + (id ?? 0); } return v; };
   const notifXB = (x) => { if (!x) return null; let net = 0, any = false; for (const p of ['hu', 'bg', 'rs', 'ua', 'md']) { const e = schedVal(x['ro' + p]), i = schedVal(x[p + 'ro']); if (e !== null) { net += e; any = true; } if (i !== null) { net -= i; any = true; } } return any ? net : null; };
+  // net cross-border (export − import) using a SPECIFIC schedule component (dayAhead | intraday)
+  const xbBy = (x, field) => { if (!x) return null; let net = 0, any = false; for (const p of ['hu', 'bg', 'rs', 'ua', 'md']) { const eo = x['ro' + p], io = x[p + 'ro']; const e = eo ? rnum(eo[field]) : null, i = io ? rnum(io[field]) : null; if (e !== null) { net += e; any = true; } if (i !== null) { net -= i; any = true; } } return any ? net : null; };
   const fmt = (v) => (v === null || v === undefined ? '' : Math.round(v).toLocaleString('en-US'));
   const dlt = (v) => (v === null ? '' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span>`);
   const arrow = (v) => (v === null ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
@@ -1213,9 +1215,11 @@ async function predictPage(date) {
     { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the demand plan.' },
     { h: 'Cons Δ', u: 'MW', help: 'Real − Notified consumption (may carry a basis offset — read the movement). Rising = demand gaining on plan → pushes the system SHORT (deficit, higher price).' },
     { h: 'Real X-B', u: 'MW', help: 'Live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. ≈ cross-border exchange (before grid losses).' },
-    { h: 'Notif X-B', u: 'MW', help: 'Notified (commercial) cross-border schedule. ↑ = export, ↓ = import.' },
+    { h: 'Notif X-B', u: 'MW', help: 'Notified (commercial) cross-border — the FULL netted rollup (day-ahead + intraday + long-term). ↑ = export, ↓ = import. Updates intraday as PI border trades clear. See X-B D-1 / X-B PI for the day-ahead vs intraday split (they won’t sum exactly to this — commercial also carries long-term rights).' },
+    { h: 'X-B D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
+    { h: 'X-B PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
     { h: 'X-B Δ', u: 'MW', help: 'Real − Notified cross-border. More export than planned drains supply → pushes the system SHORT.' },
-    { h: 'Contr ↓', u: 'MWh', help: 'Contracted downward-reserve buffer this interval. Low buffer while the system is long = negative-price risk.' },
+    { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
   ];
   const head = COLS.map((c) => `<th>${c.h}<br><small>${c.u}</small> <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span></th>`).join('');
 
@@ -1239,18 +1243,43 @@ async function predictPage(date) {
       <td>${fmt(price)}</td>
       <td>${realProd !== null ? fmt(realProd) : predCell(predReal('prod', isp, notifProd))}</td><td>${fmt(notifProd)}</td><td>${dlt(realProd !== null && notifProd !== null ? realProd - notifProd : null)}</td>
       <td>${realCons !== null ? fmt(realCons) : predCell(predReal('cons', isp, notifCons))}</td><td>${fmt(notifCons)}</td><td>${dlt(realCons !== null && notifCons !== null ? realCons - notifCons : null)}</td>
-      <td>${arrow(rxb)}</td><td>${arrow(nxb)}</td><td>${dlt(rxb !== null && nxb !== null ? rxb - nxb : null)}</td>
-      <td>${fmt(e ? rnum(e.contractedBMVolumeDown) : null)}</td>
+      <td>${arrow(rxb)}</td><td>${arrow(nxb)}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${dlt(rxb !== null && nxb !== null ? rxb - nxb : null)}</td>
+      <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
   }).join('\n');
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
-${NAV('predict', date, { left: 60, period: 60 }, colPicker('cols-predict'))}<div class="content">
+${NAV('predict', date, null, colPicker('cols-predict'))}<div class="content">
+<div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
 <table><tr><th>Int</th><th>CET</th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
   document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
   if(h){h.classList.toggle('show');ev.preventDefault();}});</script>
+<script>(function(){
+  // Near-realtime partial refresh: re-fetch this page, swap ONLY the table body in place (no full
+  // reload → no flash, scroll kept), and re-apply the colPicker column hiding to the fresh cells.
+  var POLL=15000, KEY='cols-predict';
+  function applyCols(t){try{var s=localStorage.getItem(KEY);if(!s)return;var hid=new Set(JSON.parse(s));
+    var n=t.rows[0].cells.length;
+    for(var r=0;r<t.rows.length;r++){var row=t.rows[r];if(row.cells.length!==n)continue;
+      for(var i=0;i<row.cells.length;i++)row.cells[i].style.display=hid.has(i)?'none':'';}}catch(e){}}
+  function dot(c){var d=document.getElementById('rtdot');if(d)d.style.color=c;}
+  function tick(){
+    fetch(location.href,{cache:'no-store',headers:{'X-Requested-With':'rt'}})
+      .then(function(r){if(!r.ok)throw 0;return r.text();})
+      .then(function(html){
+        var doc=new DOMParser().parseFromString(html,'text/html');
+        var fresh=doc.querySelector('.content table'), cur=document.querySelector('.content table');
+        if(fresh&&cur){cur.innerHTML=fresh.innerHTML;applyCols(cur);}
+        var el=document.getElementById('rtstamp');if(el)el.textContent=new Date().toLocaleTimeString();
+        dot('#1a9e57');
+      })
+      .catch(function(){dot('#d2691e');})
+      .finally(function(){setTimeout(tick,POLL);}); // self-paced: next poll 15s AFTER this one finishes
+  }
+  setTimeout(tick,POLL);
+})();</script>
 </body></html>`;
 }
 
