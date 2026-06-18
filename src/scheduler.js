@@ -11,6 +11,8 @@ const JOBS = [
   { name: 'weather', script: 'pull_weather.js', args: [], everyMin: 60 },
   { name: 'predict', script: 'predict.js', args: [], everyMin: 15 },
   { name: 'score', script: 'score_predictions.js', args: [], everyMin: 60 },
+  { name: 'xb_pi', script: 'log_xb_pi.js', args: [], everyMin: 1 },
+  { name: 'pi_learn', script: 'pi_learn.js', args: [], everyMin: 15 },
   // daily / weekly (UTC clock)
   { name: 'oferte', script: 'update_oferte.js', args: [], dailyUtc: '03:30', nodeArgs: ['--max-old-space-size=1536'] },
   { name: 'train', script: 'train.js', args: [], weeklyUtc: { dow: 0, hour: 4 }, nodeArgs: ['--max-old-space-size=2048'] },

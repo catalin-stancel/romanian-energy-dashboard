@@ -219,6 +219,7 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'detail' ? 'on' : ''}" href="/detail">Detail</a>
     <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
+    <a class="${active === 'pilearn' ? 'on' : ''}" href="/pilearn">PI learn</a>
     <a href="#" title="toggle dark/light theme" onclick="toggleTheme();return false">◐</a>
     <span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
   </div>
@@ -232,6 +233,7 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'detail' ? 'on' : ''}" href="/detail">Detail</a>
     <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'perf' ? 'on' : ''}" href="/perf">Performance</a>
+    <a class="${active === 'pilearn' ? 'on' : ''}" href="/pilearn">PI learn</a>
     <div class="menusep"></div>
     <a href="#" onclick="event.stopPropagation();var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
     <a href="#" onclick="toggleTheme();return false">Theme: <span id="thlabel"></span></a>
@@ -1164,6 +1166,8 @@ async function predictPage(date) {
   const xbBy = (x, field) => { if (!x) return null; let net = 0, any = false; for (const p of ['hu', 'bg', 'rs', 'ua', 'md']) { const eo = x['ro' + p], io = x[p + 'ro']; const e = eo ? rnum(eo[field]) : null, i = io ? rnum(io[field]) : null; if (e !== null) { net += e; any = true; } if (i !== null) { net -= i; any = true; } } return any ? net : null; };
   const fmt = (v) => (v === null || v === undefined ? '' : Math.round(v).toLocaleString('en-US'));
   const dlt = (v) => (v === null ? '' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span>`);
+  // forecast deviation cell (upcoming): forecast Real − Notif, shown italic to mark it's a forecast not a measured delta
+  const dltF = (v, tip) => (v === null ? '' : `<span style="font-style:italic;opacity:.7" title="${tip}"><span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span></span>`);
   const arrow = (v) => (v === null ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
 
   let lastRealIsp = null;
@@ -1185,6 +1189,17 @@ async function predictPage(date) {
     return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
   };
   const rdev = { prod: REALMODEL ? recentDev('prod') : null, cons: REALMODEL ? recentDev('cons') : null };
+  // Live cons nowcast gap: carry today's recent (real − DAMAS forecast) cons gap so the forward cons estimate
+  // self-corrects to how the day is running (the DAMAS forecast itself only refreshes ~daily).
+  const consDamasGap = (() => {
+    if (lastRealIsp === null) return 0;
+    const v = [];
+    for (let i = lastRealIsp; i > lastRealIsp - 6 && v.length < 3; i--) {
+      const s = SEN.get(i), cc = C.get(i); const f = cc ? rnum(cc.grossForecastConsumption) : null;
+      if (s && f !== null) v.push(s.cons - f);
+    }
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0;
+  })();
   const predReal = (which, isp, notif) => {
     if (!REALMODEL || notif === null || lastRealIsp === null || isp <= lastRealIsp || rdev[which] === null) return null;
     const m = REALMODEL[which]; const h = Math.min(isp - lastRealIsp, m.phi.length); const i = h - 1;
@@ -1193,6 +1208,15 @@ async function predictPage(date) {
   };
   const predCell = (pr) => (pr === null ? ''
     : `<span style="font-style:italic;opacity:.7" title="model nowcast · 80% CI ${fmt(pr.lo)}–${fmt(pr.hi)} MW">~${fmt(pr.pt)} <small>±${Math.round((pr.hi - pr.lo) / 2)}</small></span>`);
+  // upcoming-cons predictor = LIVE nowcast: DAMAS day-ahead forecast + today's carried (real − forecast) gap
+  const fcstPredCell = (v) => (v === null ? ''
+    : `<span style="font-style:italic;opacity:.7" title="live consumption nowcast = DAMAS day-ahead forecast + today's carried (real − forecast) gap — self-corrects to how the day is running. ±~170 MW">~${fmt(v)} <small>±170</small></span>`);
+  // upcoming Real prod = schedule-consistent forecast = Fcst cons + commercial net X-B (so prod − cons = the schedule)
+  const fcstProdCell = (v) => (v === null ? ''
+    : `<span style="font-style:italic;opacity:.7" title="forecast generation = Fcst cons + the cross-border schedule (so it stays consistent with Real X-B). ±~200 MW">~${fmt(v)} <small>±200</small></span>`);
+  // upcoming Real X-B = the LIVE commercial schedule (Notif X-B) — the best predictor of real net flow (~91 MW). Not differenced from noisy nowcasts.
+  const fcstXBCell = (v) => (v === null ? ''
+    : `<span style="font-style:italic;opacity:.75" title="Live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW error). Updates as intraday clears. The gap to reality = the imbalance, which only resolves at settlement. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
 
   // Predicted imbalance for upcoming intervals: from the imbalance's OWN persistence (alpha+phi*recentImb).
   // prod/cons/exports were tested as predictors and add ~0 — the DAMAS imbalance is a settlement-perimeter
@@ -1220,17 +1244,18 @@ async function predictPage(date) {
   const COLS = [
     { h: 'Imbalance', u: 'MWh', help: 'Estimated system imbalance. S (blue) = surplus / system long → low or negative price. D (orange) = deficit / system short → high price. The model nowcast (~italic, ±80% band) is shown ONLY for the next ~2h — that is the limit of what persistence can forecast (~78% next-interval sign, ~64% by 2h). It is deliberately blank further out: the intraday imbalance path is effectively unforecastable, and a point forecast there just collapses to a flat ~0 line (misleading). ± larger than the value, or a band crossing S↔D on hover, means low confidence / likely flip. NOTE: prod/cons/exports were tested as predictors and add nothing — the imbalance is a settlement-perimeter quantity, not the metered prod−cons−export balance.' },
     { h: 'Price', u: 'RON', help: 'Estimated imbalance price for the interval [RON/MWh].' },
-    { h: 'Real prod', u: 'MW', help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals show the model nowcast (~italic, hover for 80% band): notified + persistence of today’s real−notified gap. Validated ~35% error cut vs trusting the schedule.' },
-    { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, published a day ahead. NOTE: notified production sits on a higher basis than SEN metered (~several hundred MW), so read Prod Δ as a TREND, not an exact shortfall.' },
-    { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price).' },
-    { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute). Upcoming intervals show the model nowcast (~italic, hover for 80% band): notified + persistence of today’s real−notified gap. Validated ~25-30% error cut vs trusting the schedule.' },
-    { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the demand plan.' },
-    { h: 'Cons Δ', u: 'MW', help: 'Real − Notified consumption (may carry a basis offset — read the movement). Rising = demand gaining on plan → pushes the system SHORT (deficit, higher price).' },
-    { h: 'Real X-B', u: 'MW', help: 'Live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. ≈ cross-border exchange (before grid losses).' },
-    { h: 'Notif X-B', u: 'MW', help: 'Notified (commercial) cross-border — the FULL netted rollup (day-ahead + intraday + long-term). ↑ = export, ↓ = import. Updates intraday as PI border trades clear. See X-B D-1 / X-B PI for the day-ahead vs intraday split (they won’t sum exactly to this — commercial also carries long-term rights).' },
+    { h: 'Real prod', u: 'MW', help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a schedule-consistent forecast = Fcst cons + the cross-border schedule (so Real prod − Real cons = Real X-B). NOTE: an independent prod nowcast was tried but it badly mis-forecast the evening generation ramp (it can’t see the thermal/hydro ramp backing intraday exports), so the schedule-consistent version is used. Covers today + tomorrow.' },
+    { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, the BRP plan published a day ahead. NOTE: notified production sits on a higher basis than SEN metered (~+185 MW), so read Prod Δ as a TREND, not an exact shortfall; the live Real-prod nowcast corrects today’s gap.' },
+    { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price). Upcoming (italic) = forecast deviation = Fcst prod − Notif prod.' },
+    { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute). Upcoming intervals (~italic) show a LIVE nowcast = DAMAS day-ahead forecast (~2.6% MAPE) + today’s carried (real − forecast) gap, so it self-corrects to how the day is actually running (updates every 15s as intervals settle). Covers today + tomorrow.' },
+    { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the BRP demand plan, frozen D-1 ~22:45 RO. Kept for reference and for the Notif bal plan-balance, but less accurate than the live Real-cons nowcast.' },
+    { h: 'Cons Δ', u: 'MW', help: 'Real − Notified consumption (may carry a basis offset — read the movement). Rising = demand gaining on plan → pushes the system SHORT (deficit, higher price). Upcoming (italic) = forecast deviation = Fcst cons − Notif cons.' },
+    { h: 'Real X-B', u: 'MW', help: 'Settled: live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. Upcoming (italic): the live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW MAE, validated; far better than differencing the prod/cons nowcasts). Updates as intraday (PI) clears. The gap between this and reality IS the imbalance, which only resolves at settlement.' },
+    { h: 'Notif X-B', u: 'MW', help: 'Notified (commercial) cross-border — the FULL netted rollup. ↑ = export, ↓ = import. Updates intraday as PI border trades clear. Identity (holds exactly): Notif X-B = X-B D-1 + X-B PI + X-B LT.' },
     { h: 'X-B D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
     { h: 'X-B PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
-    { h: 'X-B Δ', u: 'MW', help: 'Real − Notified cross-border. More export than planned drains supply → pushes the system SHORT.' },
+    { h: 'X-B LT', u: 'MW', help: 'Long-term component of the notified cross-border (yearly + monthly capacity rights, nominated ahead of the day-ahead auction). Slowly varying — usually a steady net import on RO’s borders. This is the leg that makes Notif X-B ≠ D-1 + PI: Notif X-B = X-B D-1 + X-B PI + X-B LT. ↑ = export, ↓ = import.' },
+    { h: 'X-B Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
     { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
   ];
   const head = COLS.map((c) => `<th>${c.h}<br><small>${c.u}</small> <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span></th>`).join('');
@@ -1246,16 +1271,25 @@ async function predictPage(date) {
     const notifProd = g ? rnum(g.brpsProduction) : null;
     const realCons = sen ? sen.cons : null;
     const notifCons = g ? rnum(g.brpsConsumption) : null;
+    const fcstConsBase = c ? rnum(c.grossForecastConsumption) : null; // DAMAS day-ahead forecast
+    const fcstCons = fcstConsBase !== null ? fcstConsBase + consDamasGap : null; // LIVE: DAMAS + today's carried gap
     const rxb = sen ? -sen.sold : null, nxb = notifXB(x); // SEN sold = cons−prod; −sold = net export
+    // Forward Real X-B = the live commercial schedule (best predictor of real net flow, ~91 MW MAE = the irreducible imbalance).
+    // Backtest (14d): an independent prod/cons-derived X-B Δ was ~2× WORSE than this baseline (173 vs 91 MW; 3.5× at the
+    // evening ramp), so the forward imbalance is NOT forecastable from prod/cons → X-B Δ is SETTLED-ONLY (realized imbalance);
+    // forward imbalance is read from the Imbalance column (DAMAS persistence). Real prod fwd is schedule-consistent (prod−cons=commercial).
+    const fcstProd = fcstCons !== null && nxb !== null ? fcstCons + nxb : null;
+    const fcstXB = fcstProd !== null && fcstCons !== null ? fcstProd - fcstCons : null; // = nxb = live commercial schedule
+    const xbDeltaVal = rxb !== null && nxb !== null ? rxb - nxb : null; // realized imbalance only; null (blank) forward
     const lastClass = price !== null && price < 0 ? 'lastneg' : 'lastpos';
     const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
     return `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass}">
       <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>
       <td>${imb !== null ? dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb)) : predImbCell(predImb(isp))}</td>
       <td>${fmt(price)}</td>
-      <td>${realProd !== null ? fmt(realProd) : predCell(predReal('prod', isp, notifProd))}</td><td>${fmt(notifProd)}</td><td>${dlt(realProd !== null && notifProd !== null ? realProd - notifProd : null)}</td>
-      <td>${realCons !== null ? fmt(realCons) : predCell(predReal('cons', isp, notifCons))}</td><td>${fmt(notifCons)}</td><td>${dlt(realCons !== null && notifCons !== null ? realCons - notifCons : null)}</td>
-      <td>${arrow(rxb)}</td><td>${arrow(nxb)}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${dlt(rxb !== null && nxb !== null ? rxb - nxb : null)}</td>
+      <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td>${fmt(notifProd)}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : (fcstProd !== null && notifProd !== null ? dltF(fcstProd - notifProd, 'forecast prod deviation = Fcst prod − Notif prod (forecast Real − the notified plan)') : '')}</td>
+      <td>${realCons !== null ? fmt(realCons) : fcstPredCell(fcstCons)}</td><td>${fmt(notifCons)}</td><td>${realCons !== null && notifCons !== null ? dlt(realCons - notifCons) : (fcstCons !== null && notifCons !== null ? dltF(fcstCons - notifCons, 'forecast cons deviation = Fcst cons − Notif cons (forecast Real − the notified plan)') : '')}</td>
+      <td>${rxb !== null ? arrow(rxb) : fcstXBCell(fcstXB)}</td><td>${arrow(nxb)}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td>${xbDeltaVal === null ? '' : dlt(xbDeltaVal)}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
   }).join('\n');
@@ -1349,6 +1383,77 @@ const loginPage = (err) => `<!DOCTYPE html><html><head><meta charset="utf-8">
 <button type="submit" style="padding:12px">Sign in</button>
 </form></div></body></html>`;
 
+async function piLearnPage(date, frameTs) {
+  date = date || roDateIsp(new Date()).date;
+  const today = roDateIsp(new Date()).date;
+  const nowMs = Date.now(); const nowInfo = roDateIsp(new Date());
+  const [P, X] = await Promise.all([liveReport('estimatedImbalancePrices', date).catch(() => new Map()), liveReport('scheduledExchanges', date).catch(() => new Map())]);
+  const SEN = await liveSEN(date).catch(() => new Map());
+  const bd = ['hu', 'bg', 'rs', 'ua', 'md'];
+  const netComm = (x) => { if (!x) return null; let n = 0, any = false; for (const p of bd) { const eo = x['ro' + p], io = x[p + 'ro']; const e = eo ? rnum(eo.commercial) : null, i = io ? rnum(io.commercial) : null; if (e !== null) { n += e; any = true; } if (i !== null) { n -= i; any = true; } } return any ? n : null; };
+  const arrow = (v) => (v === null ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
+  const dlt = (v) => (v === null ? '' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span>`);
+  let lastRealIsp = null;
+  for (const { isp, ts } of dayTimestamps(date)) { const r = P.get(isp); if (new Date(ts).getTime() + 900000 <= nowMs && r && rnum(r.estimatedSystemImbalance) !== null) lastRealIsp = isp; }
+  // LEFT: slim Predict-style table — clickable rows; current (now) + last-settled highlighted like PI live
+  const leftRows = dayTimestamps(date).map(({ isp, ts }) => {
+    const p = P.get(isp), x = X.get(isp), sen = SEN.get(isp);
+    const imb = p ? rnum(p.estimatedSystemImbalance) : null;
+    const price = p ? rnum(p.estimatedPricePositiveImbalance) : null;
+    const nxb = netComm(x);
+    const rxb = sen ? -sen.sold : null;
+    const xbd = rxb !== null && nxb !== null ? rxb - nxb : null;
+    const tsMs = new Date(ts).getTime();
+    const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
+    const lastClass = price !== null && price < 0 ? 'lastneg' : 'lastpos';
+    const cls = ((isCurrent ? 'now' : isp === lastRealIsp ? lastClass : '') + (ts === frameTs ? ' rowsel' : '')).trim();
+    return `<tr class="${cls}" onclick="location='/pilearn?date=${date}&frame=${encodeURIComponent(ts)}'">
+      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>
+      <td>${imb !== null ? dirIcon(imb > 0) : ''}</td>
+      <td>${imb !== null ? Math.round(Math.abs(imb)) : ''}</td>
+      <td>${price !== null ? Math.round(price) : ''}</td>
+      <td>${arrow(nxb)}</td><td>${dlt(xbd)}</td></tr>`;
+  }).join('');
+  // RIGHT: frame trajectory for the selected interval
+  let frameHtml = '<div style="color:var(--fg-muted);font-size:13px;padding:8px">Click an interval on the left to see its X-B PI frames.</div>';
+  if (frameTs) {
+    let frames = [], realized = null;
+    try { frames = db.prepare('SELECT pulled_at, d1, pi, lt, commercial FROM xb_pi_snap WHERE ts_utc=? ORDER BY pulled_at').all(frameTs); } catch {}
+    try { const rr = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND ts_utc=?").get(frameTs); realized = rr ? rr.value : null; } catch {}
+    // grid state at each frame's pull time: system imbalance + net commercial X-B of the interval being delivered then
+    const imbMap = new Map(), sxNet = new Map();
+    if (frames.length) {
+      const fromIso = new Date(new Date(frames[0].pulled_at).getTime() - 3600000).toISOString();
+      try { for (const r of db.prepare("SELECT ts_utc, value FROM series WHERE series='damas_est_sys_imbalance' AND ts_utc >= ?").all(fromIso)) imbMap.set(r.ts_utc, r.value); } catch {}
+      try { const EXP = new Set(['damas_sx_rohu', 'damas_sx_robg', 'damas_sx_rors', 'damas_sx_roua', 'damas_sx_romd']); for (const r of db.prepare("SELECT ts_utc, series, value FROM series WHERE series LIKE 'damas_sx_%' AND ts_utc >= ?").all(fromIso)) sxNet.set(r.ts_utc, (sxNet.get(r.ts_utc) || 0) + (EXP.has(r.series) ? r.value : -r.value)); } catch {}
+    }
+    const gridTs = (pms) => new Date(Math.floor(pms / 900000) * 900000).toISOString().slice(0, 19) + '.000Z';
+    const imbSorted = [...imbMap.entries()].map(([k, v]) => [Date.parse(k), v]).sort((a, b) => a[0] - b[0]);
+    const sxSorted = [...sxNet.entries()].map(([k, v]) => [Date.parse(k), v]).sort((a, b) => a[0] - b[0]);
+    const latestLE = (arr, t) => { let r = null; for (const e of arr) { if (e[0] <= t) r = e[1]; else break; } return r; }; // freshest value as-known at t (handles settlement lag)
+    const cetClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Europe/Berlin', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); // real pull time in CET
+    let pPi = null;
+    const fr = frames.map((f) => {
+      const dpi = pPi == null ? '' : (f.pi - pPi >= 0 ? '+' : '') + Math.round(f.pi - pPi); pPi = f.pi;
+      const T = new Date(f.pulled_at).getTime(), tg = gridTs(T);
+      const gi = imbMap.has(tg) ? imbMap.get(tg) : latestLE(imbSorted, T);
+      const gx = sxNet.has(tg) ? sxNet.get(tg) : latestLE(sxSorted, T);
+      const ri = roDateIsp(new Date(f.pulled_at));
+      return `<tr><td>${ri.isp}</td><td>${cetClock(f.pulled_at)}</td><td>${Math.round(f.d1)}</td><td><b>${Math.round(f.pi)}</b></td><td class="${dpi && +dpi >= 0 ? 'pos' : 'neg'}">${dpi}</td><td>${gi != null ? dirIcon(gi > 0) + ' ' + Math.round(Math.abs(gi)) : '—'}</td><td>${gx != null ? arrow(gx) : '—'}</td></tr>`;
+    }).join('');
+    frameHtml = `<h4 style="margin:0 0 6px">Interval ${frameTs.slice(0, 16).replace('T', ' ')}Z &middot; ${frames.length} frames${realized != null ? ` &middot; realized ${Math.round(realized)} MWh (${realized > 0 ? 'S' : 'D'})` : ' &middot; not settled'}</h4>
+<table><tr><th>Int</th><th>CET</th><th>D-1</th><th>PI</th><th>ΔPI</th><th title="system imbalance of the interval being delivered when this PI change was recorded">Grid</th><th title="net commercial cross-border at that moment (↑ export, ↓ import)">X-B</th></tr>${fr || '<tr><td colspan="7" style="color:var(--fg-muted)">no frames yet</td></tr>'}</table>`;
+  }
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>PI learn</title>${STYLE}<style>.pl2{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}.pl-left{flex:0 0 auto}.pl-left tr{cursor:pointer}.pl-left tbody tr:hover td,.pl-left tr:hover td{background:rgba(255,245,0,.12)}.rowsel td{background:rgba(255,245,0,.28)!important}.pl-right{flex:1 1 340px;position:sticky;top:8px}</style></head><body>
+${NAV('pilearn', date)}<div class="content">
+<div class="pl2">
+  <div class="pl-left"><table><tr><th>Int</th><th>CET</th><th>Type</th><th>Imb<br><small>MWh</small></th><th>Price<br><small>RON</small></th><th>Notif X-B<br><small>MW</small></th><th>X-B Δ<br><small>MW</small></th></tr>${leftRows}</table></div>
+  <div class="pl-right">${frameHtml}</div>
+</div></div>
+<script>var s=document.querySelector('.rowsel')||document.querySelector('tr.now')||document.querySelector('tr.lastpos,tr.lastneg');if(s)s.scrollIntoView({block:'center'});</script>
+</body></html>`;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -1437,6 +1542,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/detail') return send(200, 'text/html', await detailPage(url.searchParams.get('date') || today));
     if (url.pathname === '/predict') return send(200, 'text/html', await predictPage(url.searchParams.get('date') || today));
     if (url.pathname === '/perf') return send(200, 'text/html', perfPage());
+    if (url.pathname === '/pilearn') return send(200, 'text/html', await piLearnPage(url.searchParams.get('date') || today, url.searchParams.get('frame')));
     send(404, 'text/plain', 'not found');
   } catch (e) {
     res.writeHead(500, { 'Content-Type': 'text/plain' });
