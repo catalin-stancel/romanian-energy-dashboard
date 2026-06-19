@@ -11,6 +11,8 @@ const JOBS = [
   { name: 'weather', script: 'pull_weather.js', args: [], everyMin: 60 },
   { name: 'predict', script: 'predict.js', args: [], everyMin: 15 },
   { name: 'score', script: 'score_predictions.js', args: [], everyMin: 60 },
+  // combo: live (paper) scoring of the xb_combo colour model — additive, writes only combo_pred, never positions.
+  { name: 'combo', script: 'combo_score.js', args: [], everyMin: 15 },
   { name: 'xb_pi', script: 'log_xb_pi.js', args: [], everyMin: 1 },
   { name: 'pi_learn', script: 'pi_learn.js', args: [], everyMin: 15 },
   // daily / weekly (UTC clock)

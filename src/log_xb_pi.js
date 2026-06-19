@@ -111,4 +111,17 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
     db.exec('COMMIT');
     console.log(`live_log +${llN} changed values`);
   } catch (e) { try { db.exec('ROLLBACK'); } catch {} console.error('live_log record failed:', e.message); }
+
+  // --- sen-filter homepage SCADA snapshots (24/7 capture for prediction): poll ~5x at 10s within this run,
+  // recording each DISTINCT snapshot (deduped by SCADA timestamp) to sen_live. Decode/schema in sen_filter.js. ---
+  try {
+    const senFilter = require('./sen_filter');
+    senFilter.ensureTable(db);
+    let sn = 0;
+    for (let i = 0; i < 5; i++) {
+      try { const d = await senFilter.fetchSenFilter(); if (d && senFilter.record(db, d, roDateIsp)) sn++; } catch { /* transient */ }
+      if (i < 4) await new Promise((r) => setTimeout(r, 10000));
+    }
+    console.log(`sen_live +${sn} snapshots`);
+  } catch (e) { console.error('sen_filter capture failed:', e.message); }
 })().catch((e) => { console.error(e); process.exit(1); });

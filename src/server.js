@@ -197,6 +197,9 @@ function pzuData(date) {
     ? new Map(db.prepare('SELECT * FROM bets WHERE run_at=? AND date_ro=?').all(betRun, date).map((r) => [r.isp, r]))
     : new Map();
   const userBets = new Map(db.prepare('SELECT isp, qty, source FROM user_bets WHERE date_ro=?').all(date).map((r) => [r.isp, r]));
+  // xb_combo D-1 colour signal (SHADOW — live-scored, does NOT drive the position; staged rollout 2026-06-19)
+  let combo = new Map();
+  try { combo = new Map(db.prepare("SELECT isp, pred_surplus, p_surplus, model_correct, realized_imb FROM combo_pred WHERE kind='d1' AND date_ro=?").all(date).map((r) => [r.isp, r])); } catch { /* combo_pred not present yet */ }
 
   const cfgRon = cfg.eur_ron;
   const rows = dayTimestamps(date).map(({ isp, ts }) => {
@@ -223,6 +226,10 @@ function pzuData(date) {
       adviceTail: a?.tail_loss ?? null,
       adviceResult: a && a.qty > 0 ? a.realized_revenue : null,
       predPrice: p?.price_p50 ?? a?.exp_price ?? null,
+      comboSurplus: combo.get(isp) ? combo.get(isp).pred_surplus === 1 : null,
+      comboP: combo.get(isp)?.p_surplus ?? null,
+      comboSettled: combo.get(isp) ? combo.get(isp).realized_imb !== null : false,
+      comboCorrect: combo.get(isp)?.model_correct ?? null,
       pzuRon, pzuConverted: pzuOfficial === null && pzuRon !== null, imbPrice, imb, qty, betSource, result,
     };
   });
@@ -497,6 +504,8 @@ function pzuPage(date) {
           ? `<span class="hold" title="EV ${fmt(r.adviceEdge)} RON/MWh, but a wrong call risks ~${fmt(r.adviceTail)} RON/MWh">HOLD — costly if wrong</span>`
           : '<span class="mid">— low EV</span>')
         : `<span class="badge ${r.adviceQty > 0 ? 'srp' : 'dfc'}">${r.adviceQty > 0 ? 'BUY' : 'SELL'}</span> ${Math.abs(r.adviceQty).toFixed(1)} MWh <small>EV ${fmt(r.adviceEdge)} RON/MWh</small>`}</td>
+    <td>${r.comboSurplus === null ? '<span class="mid">—</span>'
+      : `${dirIcon(r.comboSurplus)} <small>${(Math.max(r.comboP, 1 - r.comboP) * 100).toFixed(0)}%</small>${r.comboSettled ? (r.comboCorrect ? ' <span class="pos">✓</span>' : ' <span class="neg">✗</span>') : ''}`}</td>
     <td>${r.inWindow
       ? (() => {
         // PZU-side action: surplus position (+) = BUY on PZU; deficit (−) = SELL on PZU
@@ -549,9 +558,9 @@ ${NAV('pzu', date, null, extras)}<div class="content">
       ? `⚠ Manually UNLOCKED — changes are being recorded after the deadline. <button onclick="lockAgain()">Lock again</button>`
       : `Editable until 10:00 CET on ${euDate(addDays(date, -1))} (then locked).`}
   <span id="status"></span></div>
-<table><tr><th>Interval</th><th>CET</th><th>Prediction</th><th title="predicted imbalance, MWh">Imbalance</th><th title="predicted imbalance price, RON/MWh">Price</th><th title="PZU price, RON/MWh">PZU</th><th title="MWh, PZU-side action">Advice</th><th title="MWh, PZU-side action">Your position</th><th title="realized imbalance price, RON/MWh">Realized</th><th title="RON">Model result</th><th title="RON">Result</th></tr>
+<table><tr><th>Interval</th><th>CET</th><th>Prediction</th><th title="predicted imbalance, MWh">Imbalance</th><th title="predicted imbalance price, RON/MWh">Price</th><th title="PZU price, RON/MWh">PZU</th><th title="MWh, PZU-side action">Advice</th><th title="xb_combo day-ahead-commitment colour signal — SHADOW, live-scored, NOT driving the position yet">Combo<br><small>shadow</small></th><th title="MWh, PZU-side action">Your position</th><th title="realized imbalance price, RON/MWh">Realized</th><th title="RON">Model result</th><th title="RON">Result</th></tr>
 ${rows}
-${anyResult || anyModel ? `<tr><td colspan="9" style="text-align:right"><b>Day total</b></td>
+${anyResult || anyModel ? `<tr><td colspan="10" style="text-align:right"><b>Day total</b></td>
 <td>${anyModel ? `<b class="${totalModel >= 0 ? 'pos' : 'neg'}">${Math.round(totalModel).toLocaleString('en-US')} RON</b>` : ''}</td>
 <td>${anyResult ? `<b class="${totalResult >= 0 ? 'pos' : 'neg'}">${Math.round(totalResult).toLocaleString('en-US')} RON</b>` : ''}</td></tr>` : ''}
 </table>
@@ -902,11 +911,12 @@ const rnum = (v) => { const n = Number(v); return v !== null && v !== undefined 
 // Gas;Nuclear;Wind;Solar;Biomass. ~10-min cadence, fresh to the minute, date-range capable.
 // Replaces ENTSO-E gen_actual (which lagged ~1h and arrived with incomplete plant types).
 const senCache = {};
-async function liveSEN(date) {
+async function liveSEN(date, maxAge = 45000) {
   const c = senCache[date];
-  // 45s cache: SEN only updates ~10 min, and the host intermittently 404s server-to-server requests
+  // 45s default cache: SEN only updates ~10 min, and the host intermittently 404s server-to-server requests
   // (esp. from cloud egress) — refetching too often just invites failures. Reuse only a NON-EMPTY fresh cache.
-  if (c && c.map.size && Date.now() - c.at < 45000) return c.map;
+  // The live current-interval Real-X-B endpoint passes a shorter maxAge (~20s) to track the current interval.
+  if (c && c.map.size && Date.now() - c.at < maxAge) return c.map;
   const [y, mo, d] = date.split('-');
   const pre = '&_SENGrafic_WAR_SENGraficportlet_';
   const u = 'https://www.transelectrica.ro/widget/web/tel/sen-grafic?p_p_id=SENGrafic_WAR_SENGraficportlet&p_p_lifecycle=2&p_p_state=maximized&p_p_mode=view&p_p_cacheability=cacheLevelPage'
@@ -935,6 +945,57 @@ async function liveSEN(date) {
     if (attempt < 3) await new Promise((res) => setTimeout(res, 500));
   }
   return c ? c.map : new Map(); // all attempts failed → last-good (stale) data, else empty
+}
+
+// ---- Transelectrica live homepage feed (sen-filter, ~10s) via shared tool/sen_filter.js. Caches 10s for the
+// live UI and RECORDS every distinct snapshot (decoded core + full raw) to sen_live for prediction.
+const senFilter = require('./sen_filter');
+try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', e.message); }
+let senFilterCache = { at: 0, data: null };
+async function liveSenFilter(maxAge = 10000) {
+  if (senFilterCache.data && Date.now() - senFilterCache.at < maxAge) return senFilterCache.data;
+  const d = await senFilter.fetchSenFilter().catch(() => null);
+  if (d) { senFilterCache = { at: Date.now(), data: d }; try { senFilter.record(db, d, roDateIsp); } catch (e) { console.error('sen_live record:', e.message); } return d; }
+  return senFilterCache.data;
+}
+
+// now in Europe/Bucharest wall-clock as "naive" ms — shares the SCADA timestamps' clock so the tz offset
+// cancels out in time gaps (we only ever take differences within one local day).
+function roWallMs() {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Bucharest', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(new Date());
+  const g = (t) => +p.find((x) => x.type === t).value;
+  return Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+}
+// TIME-WEIGHTED interval average net export (realxb = −sold), as accurate as the SCADA feed allows:
+//   • readings are bucketed by their TRUE data time (ts_ms = SCADA timestamp), NOT our ~1-min-lagged record
+//     time — so a reading captured just after a boundary lands in the interval it actually belongs to;
+//   • a CARRY-IN (last reading before the interval start) sets the value at tStart, so the opening segment
+//     uses the real grid state, not the first in-interval reading;
+//   • each value is weighted by how long it was the grid state; the last holds to tEnd = full 15-min for a
+//     completed interval, or the elapsed time for the current one.
+function intervalTWA(date, isp) {
+  const [Y, Mo, D] = date.split('-').map(Number);
+  const tStart = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + (isp - 1) * 900000; // interval start (RO wall-clock naive ms)
+  const tFull = tStart + 900000;
+  const tEnd = Math.min(tFull, Math.max(roWallMs(), tStart + 1));       // completed → full 15min; current → elapsed
+  let inWin, carry;
+  try {
+    inWin = db.prepare('SELECT ts_ms, sold FROM sen_live WHERE ts_ms >= ? AND ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms').all(tStart, tEnd);
+    carry = db.prepare('SELECT sold FROM sen_live WHERE ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms DESC LIMIT 1').get(tStart);
+  } catch { return { avg: null, n: 0 }; }
+  const segs = [];
+  if (carry) segs.push({ t: tStart, sold: carry.sold });
+  for (const r of inWin) segs.push({ t: r.ts_ms, sold: r.sold });
+  if (!segs.length) return { avg: null, n: 0 };
+  segs[0].t = tStart; // anchor the first known value at the interval start
+  let num = 0, den = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const e = i === segs.length - 1 ? tEnd : segs[i + 1].t;
+    const w = Math.max(0, e - segs[i].t);
+    num += segs[i].sold * w; den += w;
+  }
+  const meanSold = den > 0 ? num / den : segs[segs.length - 1].sold;
+  return { avg: -meanSold, n: segs.length };
 }
 
 // Validated real-value nowcast model (tool/realmodel.json, fit by train_real.js). Optional — page
@@ -1003,6 +1064,19 @@ async function predictPage(date) {
   let lastRealIsp = null;
   for (const { isp, ts } of dayTimestamps(date)) { const r = P.get(isp); if (new Date(ts).getTime() + 900000 <= nowMs && r && rnum(r.estimatedSystemImbalance) !== null) lastRealIsp = isp; }
   const xbAgg = xbDeltaAgg(date); // recorded X-B Δ snapshots → interval-average + drift
+  // latest live "Sold schimb" reading — transelectrica shows the freshest sample even before the current ISP
+  // is sampled (~10-min feed). Used for the current interval's Real X-B cell so it matches the homepage exactly.
+  let latestSold = null;
+  if (nowInfo.date === date) for (let k = nowInfo.isp; k >= Math.max(1, nowInfo.isp - 8); k--) { const s = SEN.get(k); if (s && Number.isFinite(s.sold)) { latestSold = s.sold; break; } }
+  // live homepage feed (sen-filter, ~10s) — SOLD + PLAN, both from transelectrica (no DAMAS). Falls back to
+  // the SENGrafic latest sample if the feed is momentarily down.
+  const SF = nowInfo.date === date ? await liveSenFilter().catch(() => null) : null;
+  const liveSold = SF && SF.sold !== null ? SF.sold : latestSold;
+  const liveNotif = SF && SF.plan !== null ? -SF.plan : null; // Notif X-B (net export) = −PLAN
+  // interval average (net export) of every sen_live reading polled for the current interval
+  let liveAvg = null, liveAvgN = 0;
+  if (nowInfo.date === date) { const tw = intervalTWA(date, nowInfo.isp); liveAvg = tw.avg; liveAvgN = tw.n; } // time-weighted by SCADA timestamps
+  if (liveAvg === null && liveSold !== null) liveAvg = -liveSold; // seed with the live value so it never blanks
 
   // --- Nowcast prediction of real prod/cons for upcoming (not-yet-settled) intervals ---
   // pred = notified + phi[h]*recentDev, recentDev = mean(real-notified) over the last 3 settled
@@ -1102,7 +1176,7 @@ async function predictPage(date) {
       <td>${price !== null ? fmt(price) : (epImb !== null ? provPriceSpan(epImb) : '')}</td>
       <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td>${fmt(notifProd)}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : (fcstProd !== null && notifProd !== null ? dltF(fcstProd - notifProd, 'forecast prod deviation = Fcst prod − Notif prod (forecast Real − the notified plan)') : '')}</td>
       <td>${realCons !== null ? fmt(realCons) : fcstPredCell(fcstCons)}</td><td>${fmt(notifCons)}</td><td>${realCons !== null && notifCons !== null ? dlt(realCons - notifCons) : (fcstCons !== null && notifCons !== null ? dltF(fcstCons - notifCons, 'forecast cons deviation = Fcst cons − Notif cons (forecast Real − the notified plan)') : '')}</td>
-      <td>${rxb !== null ? arrow(rxb) : fcstXBCell(fcstXB)}</td><td>${arrow(nxb)}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td>${xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))}</td>
+      <td data-rxb="${isp}"${isCurrent && liveSold !== null && liveNotif !== null && -liveSold !== liveNotif ? ` style="background:${-liveSold > liveNotif ? 'rgba(26,158,87,.45)' : 'rgba(214,48,48,.45)'}!important"` : ''}>${isCurrent ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (rxb !== null ? arrow(rxb) : fcstXBCell(fcstXB))}</td><td>${arrow(nxb)}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td>${xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
   }).join('\n');
@@ -1138,6 +1212,29 @@ ${body}</table></div>
       .finally(function(){setTimeout(tick,POLL);}); // self-paced: next poll 15s AFTER this one finishes
   }
   setTimeout(tick,POLL);
+})();</script>
+<script>(function(){
+  // LIVE current-interval Real X-B tracker (Transelectrica Sold). Updates ONLY the current interval's Real X-B
+  // cell on a fast (8s) cadence so a change is caught quickly; past intervals stay frozen at their last-taken
+  // value (the 15s full refresh renders them from the feed's last sample). On rollover the live value moves to
+  // the new current interval and the prior cell keeps the value as last taken.
+  var DATE=${JSON.stringify(date)}, last=null;
+  function ar(v){return v>=0?('↑'+Math.round(v)):('↓'+Math.round(-v));}
+  function tick(){
+    fetch('/api/realxb_now?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      if(j.isp==null||j.realxb==null)return;
+      if(last!==null&&last!==j.isp){var o=document.querySelector('td[data-rxb="'+last+'"] .rxblive');if(o)o.remove();} // freeze prior interval (keep its value + colour)
+      var c=document.querySelector('td[data-rxb="'+j.isp+'"]');
+      if(c){
+        c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+Math.round(j.notifxb)+' MW · '+new Date().toLocaleTimeString();
+        c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'');
+        if(j.notifxb!=null){c.style.removeProperty('background');if(j.realxb!==j.notifxb)c.style.setProperty('background',j.realxb>j.notifxb?'rgba(26,158,87,.45)':'rgba(214,48,48,.45)','important');} // green over / red under Notif X-B (must beat the .now !important tint)
+        if(c.animate)c.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'}); // gentle blink on each refresh
+      }
+      last=j.isp;
+    }).catch(function(){}).finally(function(){setTimeout(tick,8000);});
+  }
+  setTimeout(tick,1200);
 })();</script>
 </body></html>`;
 }
@@ -1261,8 +1358,25 @@ async function piLearnPage(date, frameTs) {
     frameHtml = `<h4 style="margin:0 0 6px">Interval ${frameTs.slice(0, 16).replace('T', ' ')}Z &middot; ${frames.length} frames${realized != null ? ` &middot; realized ${Math.round(realized)} MWh (${realized > 0 ? 'S' : 'D'})` : ' &middot; not settled'}</h4>
 <table><tr><th>Int</th><th>CET</th><th>D-1</th><th>PI</th><th>ΔPI</th><th title="system imbalance of the interval being delivered when this PI change was recorded">Grid</th><th title="net commercial cross-border at that moment (↑ export, ↓ import)">X-B</th></tr>${fr || '<tr><td colspan="7" style="color:var(--fg-muted)">no frames yet</td></tr>'}</table>`;
   }
+  // --- learning scoreboard (read-only): combo live (paper) score + pi_learn online learner. NEVER drives positions. ---
+  let learnBanner = '';
+  {
+    let comboTxt = 'combo intraday (paper): warming up', plTxt = '';
+    try {
+      const ci = db.prepare("SELECT COUNT(*) n, AVG(model_correct)*100 acc, AVG(persist_correct)*100 pacc, SUM(pnl_ron) pnl, SUM(ABS(qty)) mwh FROM combo_pred WHERE kind='intraday' AND realized_imb IS NOT NULL").get();
+      const pend = db.prepare("SELECT COUNT(*) n FROM combo_pred WHERE kind='intraday' AND realized_imb IS NULL").get();
+      if (ci && ci.n) comboTxt = `combo intraday (paper): <b>${ci.acc.toFixed(1)}%</b> vs persist ${ci.pacc !== null ? ci.pacc.toFixed(1) : '—'}% · n=${ci.n}${ci.mwh ? ` · ${(ci.pnl / ci.mwh).toFixed(0)} RON/MWh` : ''}`;
+      else if (pend && pend.n) comboTxt = `combo intraday (paper): warming up · ${pend.n} frozen, awaiting settlement`;
+    } catch { /* combo_pred not present yet */ }
+    try {
+      const pl = db.prepare('SELECT n, model_ok, persist_ok FROM pi_learn_state').get();
+      if (pl && pl.n) plTxt = ` &nbsp;·&nbsp; pi_learn online: <b>${(pl.model_ok / pl.n * 100).toFixed(1)}%</b> vs persist ${(pl.persist_ok / pl.n * 100).toFixed(1)}% · n=${pl.n}`;
+    } catch { /* pi_learn_state not present yet */ }
+    learnBanner = `<div style="margin:0 0 10px;padding:7px 11px;background:rgba(255,245,0,.08);border:1px solid rgba(128,128,128,.3);border-radius:6px;font-size:12px">📈 Learning signals — ${comboTxt}${plTxt}<span style="color:var(--fg-muted);margin-left:8px">· read-only, validating forward — not driving positions</span></div>`;
+  }
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>PI learn</title>${STYLE}<style>.pl2{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}.pl-left{flex:0 0 auto}.pl-left tr{cursor:pointer}.pl-left tbody tr:hover td,.pl-left tr:hover td{background:rgba(255,245,0,.12)}.rowsel td{background:rgba(255,245,0,.28)!important}.pl-right{flex:1 1 340px;position:sticky;top:8px}</style></head><body>
 ${NAV('pilearn', date)}<div class="content">
+${learnBanner}
 <div class="pl2">
   <div class="pl-left"><table><tr><th>Int</th><th>CET</th><th>Type</th><th>Imb<br><small>MWh</small></th><th>Price<br><small>RON</small></th><th>Notif X-B<br><small>MW</small></th><th>X-B Δ<br><small>MW</small></th></tr>${leftRows}</table></div>
   <div class="pl-right">${frameHtml}</div>
@@ -1349,6 +1463,24 @@ const server = http.createServer(async (req, res) => {
       const { date } = await readBody(req);
       db.prepare('INSERT OR REPLACE INTO page_unlocks (date_ro, unlocked, updated_at, user) VALUES (?,0,?,?)').run(date, new Date().toISOString(), req.user);
       return json({ ok: true });
+    }
+    if (url.pathname === '/api/realxb_now') {
+      // Live Transelectrica "Sold" for the CURRENT interval only → Real X-B (= −sold), plus the interval's
+      // Notif X-B so the client can colour the cell (green = Real over Notif = surplus; red = under = deficit).
+      // 20s SEN cache (track closely without hammering the flaky host); scheduledExchanges via liveReport (15s).
+      const qd = url.searchParams.get('date') || today;
+      const ni = roDateIsp(new Date());
+      const isp = ni.date === qd ? ni.isp : null;
+      // Live from transelectrica's homepage feed (sen-filter, ~10s): SOLD (exchange balance, neg=export) and
+      // PLAN (scheduled exchange). Notif X-B (net export) = −PLAN. All transelectrica, no DAMAS.
+      const sf = await liveSenFilter().catch(() => null);
+      const sold = sf ? sf.sold : null;
+      const notifxb = sf && sf.plan !== null ? -sf.plan : null;
+      // interval average (net export) of every sen_live reading polled for the current interval
+      let avg = null, navg = 0;
+      if (isp) { const tw = intervalTWA(ni.date, isp); avg = tw.avg; navg = tw.n; } // time-weighted by SCADA timestamps
+      if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks at interval start
+      return json({ isp, sold, realxb: sold !== null ? -sold : null, notifxb, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
     }
     if (url.pathname === '/api/pzu') return json(pzuData(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pzu' || url.pathname === '/') return send(200, 'text/html', pzuPage(url.searchParams.get('date') || addDays(today, 1)));
