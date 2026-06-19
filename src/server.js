@@ -959,44 +959,11 @@ async function liveSenFilter(maxAge = 10000) {
   return senFilterCache.data;
 }
 
-// now in Europe/Bucharest wall-clock as "naive" ms — shares the SCADA timestamps' clock so the tz offset
-// cancels out in time gaps (we only ever take differences within one local day).
-function roWallMs() {
-  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Bucharest', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(new Date());
-  const g = (t) => +p.find((x) => x.type === t).value;
-  return Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
-}
-// TIME-WEIGHTED interval average net export (realxb = −sold), as accurate as the SCADA feed allows:
-//   • readings are bucketed by their TRUE data time (ts_ms = SCADA timestamp), NOT our ~1-min-lagged record
-//     time — so a reading captured just after a boundary lands in the interval it actually belongs to;
-//   • a CARRY-IN (last reading before the interval start) sets the value at tStart, so the opening segment
-//     uses the real grid state, not the first in-interval reading;
-//   • each value is weighted by how long it was the grid state; the last holds to tEnd = full 15-min for a
-//     completed interval, or the elapsed time for the current one.
+// interval time-weighted average net export — delegates to the CANONICAL impl in sen_filter.js (single source
+// of truth; the same function persists per-interval averages to sen_interval). Returns { avg: realxb-avg, n }.
 function intervalTWA(date, isp) {
-  const [Y, Mo, D] = date.split('-').map(Number);
-  const tStart = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + (isp - 1) * 900000; // interval start (RO wall-clock naive ms)
-  const tFull = tStart + 900000;
-  const tEnd = Math.min(tFull, Math.max(roWallMs(), tStart + 1));       // completed → full 15min; current → elapsed
-  let inWin, carry;
-  try {
-    inWin = db.prepare('SELECT ts_ms, sold FROM sen_live WHERE ts_ms >= ? AND ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms').all(tStart, tEnd);
-    carry = db.prepare('SELECT sold FROM sen_live WHERE ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms DESC LIMIT 1').get(tStart);
-  } catch { return { avg: null, n: 0 }; }
-  const segs = [];
-  if (carry) segs.push({ t: tStart, sold: carry.sold }); // carry fills [tStart, first reading]
-  for (const r of inWin) segs.push({ t: r.ts_ms, sold: r.sold });
-  if (!segs.length) return { avg: null, n: 0 };
-  // NO extend-back: without a carry-in, average only over the measured window [first reading, tEnd]; never
-  // over-weight the first reading by claiming time before its own SCADA timestamp (energy-industry time-weighting).
-  let num = 0, den = 0;
-  for (let i = 0; i < segs.length; i++) {
-    const e = i === segs.length - 1 ? tEnd : segs[i + 1].t;
-    const w = Math.max(0, e - segs[i].t);
-    num += segs[i].sold * w; den += w;
-  }
-  const meanSold = den > 0 ? num / den : segs[segs.length - 1].sold;
-  return { avg: -meanSold, n: segs.length };
+  const r = senFilter.intervalAvg(db, date, isp);
+  return r ? { avg: r.avgRealxb, n: r.n } : { avg: null, n: 0 };
 }
 
 // Validated real-value nowcast model (tool/realmodel.json, fit by train_real.js). Optional — page

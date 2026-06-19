@@ -71,4 +71,69 @@ function record(db, d, roDateIsp) {
   return info.changes > 0;
 }
 
-module.exports = { fetchSenFilter, ensureTable, record, naiveMs, DECODE, URL };
+// ---- per-interval TIME-WEIGHTED average (energy-industry: Σ value×duration / Σ duration) over sen_live ----
+// CANONICAL impl — server.js intervalTWA delegates here; saveIntervalAvg persists it. Keep the weighting ONLY here.
+function roWallMs() {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Bucharest', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(new Date());
+  const g = (t) => +p.find((x) => x.type === t).value;
+  return Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second')); // RO wall-clock naive ms
+}
+function intervalAvg(db, dateRo, isp) {
+  const [Y, Mo, D] = dateRo.split('-').map(Number);
+  const tStart = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + (isp - 1) * 900000;
+  const tFull = tStart + 900000;
+  const tEnd = Math.min(tFull, Math.max(roWallMs(), tStart + 1)); // completed → full 15min; current → elapsed
+  let inWin, carry;
+  try {
+    inWin = db.prepare('SELECT ts_ms, sold FROM sen_live WHERE ts_ms >= ? AND ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms').all(tStart, tEnd);
+    carry = db.prepare('SELECT sold FROM sen_live WHERE ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms DESC LIMIT 1').get(tStart);
+  } catch { return null; }
+  const segs = [];
+  if (carry) segs.push({ t: tStart, sold: carry.sold }); // carry fills [tStart, first reading]
+  for (const r of inWin) segs.push({ t: r.ts_ms, sold: r.sold });
+  if (!segs.length) return null;
+  // NO extend-back: never over-weight the first reading by claiming time before its own SCADA timestamp.
+  let num = 0, den = 0;
+  for (let i = 0; i < segs.length; i++) { const e = i === segs.length - 1 ? tEnd : segs[i + 1].t; const w = Math.max(0, e - segs[i].t); num += segs[i].sold * w; den += w; }
+  if (den <= 0) return null;
+  const avgSold = num / den;
+  return { avgSold, avgRealxb: -avgSold, n: segs.length, tStart, complete: tEnd >= tFull };
+}
+function ensureIntervalTable(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS sen_interval (
+    date_ro TEXT, isp INTEGER, avg_sold REAL, avg_realxb REAL, n INTEGER, saved_at TEXT,
+    PRIMARY KEY (date_ro, isp)
+  );
+  CREATE INDEX IF NOT EXISTS ix_seninterval_date ON sen_interval(date_ro);`);
+}
+// compute + upsert one COMPLETED interval's time-weighted average. Returns true if saved.
+function saveIntervalAvg(db, dateRo, isp) {
+  const r = intervalAvg(db, dateRo, isp);
+  if (!r || !r.complete) return false;
+  db.prepare(`INSERT INTO sen_interval (date_ro, isp, avg_sold, avg_realxb, n, saved_at) VALUES (?,?,?,?,?,?)
+    ON CONFLICT(date_ro, isp) DO UPDATE SET avg_sold=excluded.avg_sold, avg_realxb=excluded.avg_realxb, n=excluded.n, saved_at=excluded.saved_at`)
+    .run(dateRo, isp, +r.avgSold.toFixed(2), +r.avgRealxb.toFixed(2), r.n, new Date().toISOString());
+  return true;
+}
+// persist per-interval averages: backfill every COMPLETED interval in sen_live (idempotent, bounded) and
+// re-finalize the last few (late SCADA readings can still land ~1-2 min after an interval ends).
+function backfillIntervals(db, { maxNew = 500, refinishMin = 4 } = {}) {
+  ensureIntervalTable(db);
+  const roNow = roWallMs();
+  const ivs = db.prepare('SELECT DISTINCT date_ro, isp FROM sen_live').all();
+  const saved = new Set(db.prepare('SELECT date_ro, isp FROM sen_interval').all().map((r) => r.date_ro + '|' + r.isp));
+  const todo = [];
+  for (const { date_ro, isp } of ivs) {
+    const [Y, Mo, D] = date_ro.split('-').map(Number);
+    const tEnd = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + isp * 900000; // interval end
+    if (tEnd > roNow - 120000) continue;                          // not safely complete yet (SCADA lag buffer)
+    const already = saved.has(date_ro + '|' + isp);
+    if (!already || tEnd > roNow - refinishMin * 60000) todo.push({ date_ro, isp, already });
+  }
+  todo.sort((a, b) => (a.date_ro + String(a.isp).padStart(3, '0')).localeCompare(b.date_ro + String(b.isp).padStart(3, '0')));
+  let n = 0, newN = 0;
+  for (const it of todo) { if (!it.already) { if (newN >= maxNew) continue; newN++; } if (saveIntervalAvg(db, it.date_ro, it.isp)) n++; }
+  return n;
+}
+
+module.exports = { fetchSenFilter, ensureTable, record, naiveMs, intervalAvg, ensureIntervalTable, saveIntervalAvg, backfillIntervals, roWallMs, DECODE, URL };

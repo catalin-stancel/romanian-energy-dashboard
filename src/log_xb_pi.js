@@ -123,5 +123,10 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
       if (i < 4) await new Promise((r) => setTimeout(r, 10000));
     }
     console.log(`sen_live +${sn} snapshots`);
+    // persist per-interval time-weighted averages to sen_interval (backfills completed intervals + re-finalizes
+    // the last few for late SCADA readings) — the "| avg" value saved back in time, for prediction.
+    senFilter.ensureIntervalTable(db);
+    const ni = senFilter.backfillIntervals(db);
+    console.log(`sen_interval +${ni} interval averages`);
   } catch (e) { console.error('sen_filter capture failed:', e.message); }
 })().catch((e) => { console.error(e); process.exit(1); });
