@@ -984,10 +984,11 @@ function intervalTWA(date, isp) {
     carry = db.prepare('SELECT sold FROM sen_live WHERE ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms DESC LIMIT 1').get(tStart);
   } catch { return { avg: null, n: 0 }; }
   const segs = [];
-  if (carry) segs.push({ t: tStart, sold: carry.sold });
+  if (carry) segs.push({ t: tStart, sold: carry.sold }); // carry fills [tStart, first reading]
   for (const r of inWin) segs.push({ t: r.ts_ms, sold: r.sold });
   if (!segs.length) return { avg: null, n: 0 };
-  segs[0].t = tStart; // anchor the first known value at the interval start
+  // NO extend-back: without a carry-in, average only over the measured window [first reading, tEnd]; never
+  // over-weight the first reading by claiming time before its own SCADA timestamp (energy-industry time-weighting).
   let num = 0, den = 0;
   for (let i = 0; i < segs.length; i++) {
     const e = i === segs.length - 1 ? tEnd : segs[i + 1].t;
