@@ -98,6 +98,93 @@ function xbDeltaAgg(date) {
   } catch { /* table not created yet */ }
   return m;
 }
+// Last intraday change to the NOTIFIED cross-border per interval = the most recent PI trade. xb_pi_snap stores only
+// CHANGED frames (commercial = net export), so the last non-zero step in `commercial` is what the market just did:
+// +Δ = net export rose → the market SOLD (more export); −Δ = net export fell → it BOUGHT (more import).
+function xbPiChange(date) {
+  const m = new Map();
+  try {
+    const rows = db.prepare('SELECT isp, commercial FROM xb_pi_snap WHERE date_ro=? AND commercial IS NOT NULL ORDER BY isp, pulled_at').all(date);
+    const byIsp = new Map();
+    for (const r of rows) { if (!byIsp.has(r.isp)) byIsp.set(r.isp, []); byIsp.get(r.isp).push(r.commercial); }
+    for (const [isp, v] of byIsp) { let last = null; for (let i = 1; i < v.length; i++) { const d = v[i] - v[i - 1]; if (Math.abs(d) >= 1) last = d; } if (last !== null) m.set(isp, last); }
+  } catch { /* table not created yet */ }
+  return m;
+}
+// Romania weather per UTC hour: ensemble + spatial mean (ECMWF/ICON/GFS × 4 regions) from the `weather` forecast
+// table. "real" ≈ the latest pull (analysis for past hours / current forecast ahead); "forecast" = the last pull
+// made before the delivery day (D-1). Returns Map "YYYY-MM-DDTHH" → { cloud, windReal, windFc } (wind = 100m km/h).
+function weatherForDate(date) {
+  const out = new Map();
+  try {
+    const lo = date + 'T00:00:00Z', hi = addDays(date, 1) + 'T06:00:00Z'; // RO day spans ~prevday22:00..day22:00 UTC; widen a bit
+    const realPull = (db.prepare('SELECT MAX(pulled_at) m FROM weather').get() || {}).m;
+    const fcPull = (db.prepare('SELECT MAX(pulled_at) m FROM weather WHERE pulled_at < ?').get(date + 'T00:00Z') || {}).m;
+    const agg = (pull, vr) => {
+      const o = new Map();
+      if (!pull) return o;
+      const acc = new Map();
+      for (const r of db.prepare('SELECT ts_utc, value FROM weather WHERE pulled_at=? AND var=? AND ts_utc>=? AND ts_utc<=?').all(pull, vr, lo.slice(0, 13) + ':00:00Z', hi)) {
+        const k = r.ts_utc.slice(0, 13); const e = acc.get(k) || { s: 0, n: 0 }; e.s += r.value; e.n++; acc.set(k, e);
+      }
+      for (const [k, e] of acc) o.set(k, e.s / e.n);
+      return o;
+    };
+    const cloudR = agg(realPull, 'cloud_cover'), windR = agg(realPull, 'wind_speed_100m'), windF = agg(fcPull, 'wind_speed_100m');
+    for (const k of new Set([...cloudR.keys(), ...windR.keys()])) out.set(k, { cloud: cloudR.has(k) ? cloudR.get(k) : null, windReal: windR.has(k) ? windR.get(k) : null, windFc: windF.has(k) ? windF.get(k) : null });
+  } catch { /* table not created yet */ }
+  return out;
+}
+const skyIcon = (cloud) => (cloud == null ? '' : cloud < 20 ? '☀️' : cloud < 50 ? '🌤️' : cloud < 80 ? '⛅' : '☁️');
+// weather AS IT WAS at a past UTC hour = the freshest reading we have for that hour (latest pull covering it, ensemble
+// + spatial mean). For historical rows. Needs ix_weather_ts (added at startup) to be fast.
+function wxAtHour(hourISO) {
+  try {
+    const rows = db.prepare("SELECT var, AVG(value) v FROM weather WHERE ts_utc=? AND pulled_at=(SELECT MAX(pulled_at) FROM weather WHERE ts_utc=?) AND var IN ('cloud_cover','wind_speed_100m') GROUP BY var").all(hourISO, hourISO);
+    if (!rows.length) return null;
+    let cloud = null, wind = null;
+    for (const r of rows) { if (r.var === 'cloud_cover') cloud = r.v; else if (r.var === 'wind_speed_100m') wind = r.v; }
+    return { cloud, windReal: wind };
+  } catch { return null; }
+}
+const wxCell = (wx) => {
+  if (!wx || (wx.cloud == null && wx.windReal == null)) return '';
+  const wr = wx.windReal != null ? Math.round(wx.windReal) : null;
+  const wf = wx.windFc != null ? Math.round(wx.windFc) : null;
+  const windTxt = wr != null ? `💨${wr}${wf != null && Math.abs(wf - wr) >= 2 ? ` <small style="opacity:.55">(${wf})</small>` : ''}` : (wf != null ? `💨${wf}` : '');
+  const tip = `Romania ensemble mean — sky ${wx.cloud != null ? Math.round(wx.cloud) + '% cloud' : '?'} · wind 100m ${wr != null ? wr + ' km/h (latest run ≈ real)' : '?'}${wf != null ? `, ${wf} km/h forecast (D-1)` : ''}`;
+  return `<span title="${tip}">${skyIcon(wx.cloud)} ${windTxt}</span>`;
+};
+// A historical reference row for the SAME interval on an earlier day (the −1d/−2d rows under an expanded interval, and
+// under the trade row). Sourced from `series` (settled DAMAS) + sen_interval (real X-B avg); 18-col aligned; columns
+// without clean history stay blank. `gate` → green grouping box (trade row); else neutral. data-pisp ties it to its parent.
+function histRowHtml(d, isp, label, last, gate) {
+  const f = (v) => (v === null || v === undefined ? '' : Math.round(v).toLocaleString('en-US'));
+  const ar = (v) => (v === null || v === undefined ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
+  const dl = (v) => (v === null || v === undefined ? '' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span>`);
+  const need = ['damas_est_sys_imbalance', 'damas_est_price_pos', 'damas_notif_prod', 'damas_notif_cons', 'damas_cons_real',
+    'damas_sx_rohu', 'damas_sx_robg', 'damas_sx_rors', 'damas_sx_roua', 'damas_sx_romd', 'damas_sx_huro', 'damas_sx_bgro', 'damas_sx_rsro', 'damas_sx_uaro', 'damas_sx_mdro'];
+  const m = {};
+  try { for (const r of db.prepare(`SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series IN (${need.map(() => '?').join(',')})`).all(d, isp, ...need)) m[r.series] = r.value; } catch { /* ignore */ }
+  let rxb = null; try { const r = db.prepare('SELECT avg_realxb FROM sen_interval WHERE date_ro=? AND isp=?').get(d, isp); if (r) rxb = r.avg_realxb; } catch { /* ignore */ }
+  const imb = m['damas_est_sys_imbalance'] ?? null, price = m['damas_est_price_pos'] ?? null;
+  const np = m['damas_notif_prod'] ?? null, nc = m['damas_notif_cons'] ?? null, rc = m['damas_cons_real'] ?? null;
+  let nxb = null, any = false;
+  for (const s of ['damas_sx_rohu', 'damas_sx_robg', 'damas_sx_rors', 'damas_sx_roua', 'damas_sx_romd']) if (m[s] != null) { nxb = (nxb || 0) + m[s]; any = true; }
+  for (const s of ['damas_sx_huro', 'damas_sx_bgro', 'damas_sx_rsro', 'damas_sx_uaro', 'damas_sx_mdro']) if (m[s] != null) { nxb = (nxb || 0) - m[s]; any = true; }
+  if (!any) nxb = null;
+  const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
+  // weather as it was at that interval's hour
+  let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
+  return `<tr class="histrow ${gate ? 'hg' : 'hx'}${last ? ' histrow-last' : ''}" data-pisp="${isp}"><td title="same interval, ${d}"><span class="histlbl">${label}</span></td><td><small>${cetLabel(isp)}</small></td>`
+    + `<td>${imb !== null ? dirIcon(imb > 0) + ' ' + f(Math.abs(imb)) : ''}</td>`
+    + `<td>${price !== null ? f(price) + ' <small class="cur">lei</small>' : ''}</td>`
+    + `<td></td><td>${f(np)}</td><td>${wxTxt}</td><td></td>`
+    + `<td>${f(rc)}</td><td>${f(nc)}</td><td></td>`
+    + `<td>${rxb !== null ? ar(rxb) : ''}</td><td>${nxb !== null ? ar(nxb) : ''}</td><td></td><td></td><td></td>`
+    + `<td>${xbd !== null ? dl(xbd) : ''}</td>`
+    + `<td>${np !== null && nc !== null && nxb !== null ? dl(np - nc - nxb) : ''}</td></tr>`;
+}
 const xbDeltaCell = (agg, isp) => { // returns averaged-cell HTML, or null to let the caller fall back to the live value
   const a = agg && agg.get(isp);
   if (!a || a.n < 2) return null;
@@ -114,7 +201,12 @@ const colPicker = (key, mobileHidden, defaultHidden) => `
   var key=${JSON.stringify(key)};
   var table=document.querySelector('.content table');
   if(!table)return;
-  var head=[].map.call(table.rows[0].cells,function(c){return c.textContent.trim()});
+  var head=[].map.call(table.rows[0].cells,function(c){
+    var clone=c.cloneNode(true);
+    clone.querySelectorAll('.help').forEach(function(h){h.remove();}); // drop the ⓘ tooltip text — hidden, but textContent slurps it in and bloats the label
+    clone.querySelectorAll('br').forEach(function(b){b.replaceWith(' ');}); // title<br>unit → "title unit"
+    return clone.textContent.replace(/\\s+/g,' ').trim(); // NB: \\s — this is inside a template literal, so \s would de-escape to a literal "s" and eat every s in the labels
+  });
   // default-hidden set: defaultHidden on every device + mobileHidden extras on phones (until the user picks own)
   var saved=localStorage.getItem(key);
   var dflt=${JSON.stringify(defaultHidden || [])}.concat(window.matchMedia('(max-width:760px)').matches?${JSON.stringify(mobileHidden || [])}:[]);
@@ -404,6 +496,47 @@ tr.lastneg td{background:var(--tint-neg-strong) !important;border-top:2px solid 
 .colpanel label{display:block;font-size:12px;padding:3px 0;white-space:nowrap;cursor:pointer}
 tr.winstart td{border-top:3px solid var(--fg-muted)}
 tr.winend td{border-bottom:3px solid var(--fg-muted)}
+/* intraday trade-gate state (75-min lead): left rail per row — grey=past, amber=locked, green=open to trade */
+tr.t-past td:first-child{box-shadow:inset 3px 0 0 var(--border-2)}
+tr.t-past:not(.lastpos):not(.lastneg) td{opacity:.5}
+tr.t-locked td:first-child{box-shadow:inset 3px 0 0 #D9A441}
+tr.t-locked td{background:rgba(217,164,65,.08)}
+tr.t-open td:first-child{box-shadow:inset 3px 0 0 var(--ic-s)}
+/* current TRADE interval (front of the gate, first still-tradeable) — the highlighted "trade now" row */
+/* the current TRADE row + its 2 historical rows form one outlined 3-row block (green box: top on gate, sides on all 3, bottom on the −2d row) */
+tr.gateopen td{background:var(--tint-pos-strong)!important;border-top:3px solid var(--ic-s);font-weight:600}
+tr.gateopen td:first-child{border-left:3px solid var(--ic-s)}
+tr.gateopen td:last-child{border-right:3px solid var(--ic-s)}
+.tradearrow{color:var(--ic-s);font-weight:800}
+.ivtimer{font:700 12px var(--font-mono);color:var(--fg);background:var(--bg-surface);padding:0 6px;border-radius:6px;white-space:nowrap;display:inline-block;min-width:4.2em;text-align:center;font-variant-numeric:tabular-nums}
+.lockico{font-size:11px;filter:grayscale(.2)}
+.cur{opacity:.45;font-weight:400;font-size:10px}
+/* the LIVE current-state row (live Transelectrica export): twice as tall, with Real & Notif cross-border at 2× font */
+tr.liverow td{padding-top:12px;padding-bottom:12px}
+tr.liverow td[data-rxb],tr.liverow td.nxbcell{font-size:2em;font-weight:700;line-height:1}
+tr.liverow td[data-rxb] small,tr.liverow td.nxbcell small{font-size:11px;font-weight:600}
+/* historical reference sub-rows inside the trade block (same interval, prev 2 days) — dimmed + inside the green box */
+tr.histrow td{font-size:12px;background:var(--bg-subtle);color:var(--fg-muted)}
+/* hg = trade-row history (green box); hx = expand-icon history (neutral yellow box) */
+tr.histrow.hg td:first-child{border-left:3px solid var(--ic-s)} tr.histrow.hg td:last-child{border-right:3px solid var(--ic-s)} tr.histrow.hg.histrow-last td{border-bottom:3px solid var(--ic-s)}
+tr.histrow.hx td:first-child{border-left:3px solid var(--yg-yellow)} tr.histrow.hx td:last-child{border-right:3px solid var(--yg-yellow)} tr.histrow.hx.histrow-last td{border-bottom:3px solid var(--yg-yellow)}
+/* the expanded parent row (non-trade) closes the top + sides of the yellow box */
+tr.expanded:not(.gateopen) td{border-top:3px solid var(--yg-yellow)} tr.expanded:not(.gateopen) td:first-child{border-left:3px solid var(--yg-yellow)} tr.expanded:not(.gateopen) td:last-child{border-right:3px solid var(--yg-yellow)}
+.histlbl{display:inline-block;background:var(--ic-s);color:#fff;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px}
+tr.hx .histlbl{background:var(--yg-yellow);color:var(--yg-black)}
+.exp{cursor:pointer;display:inline-block;width:20px;height:20px;line-height:18px;text-align:center;font-size:12px;border:1px solid var(--border-2);border-radius:5px;color:var(--fg);background:var(--bg-subtle);user-select:none;margin-right:6px;vertical-align:middle}
+.exp:hover{border-color:var(--yg-yellow);background:var(--yg-yellow);color:var(--yg-black)}
+tr.expanded>td:first-child .exp,tr.gateopen>td:first-child .exp{border-color:var(--yg-yellow)}
+.pi-i{cursor:pointer;opacity:.5;font-size:11px}.pi-i:hover{opacity:1}
+.pimodal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200;align-items:center;justify-content:center}
+.pimodal.open{display:flex}
+.pimbox{background:var(--bg-surface);border:1px solid var(--border-2);border-radius:12px;max-width:540px;width:92%;max-height:80vh;overflow:auto;padding:14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+.pimhead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+.pimx{cursor:pointer;opacity:.6;font-size:18px;line-height:1}.pimx:hover{opacity:1}
+.pimbox table{width:100%;font-size:12px;border-collapse:collapse}
+.pimbox th,.pimbox td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--border-1)}
+caption.gatecap{caption-side:top;text-align:left;padding:7px 4px;font-size:12px;color:var(--fg-muted)}
+caption.gatecap b{color:var(--fg)} caption.gatecap .lk{color:#D9A441;font-weight:600} caption.gatecap .op{color:var(--ic-s);font-weight:600}
 .pos{color:var(--pos);font-weight:600}.neg{color:var(--neg);font-weight:600}
 tr.pnlpos td{background:var(--tint-pos)}tr.pnlneg td{background:var(--tint-neg)}
 .money{font-family:var(--font-mono);font-weight:500;line-height:1}
@@ -953,6 +1086,8 @@ async function liveSEN(date, maxAge = 45000) {
 // live UI and RECORDS every distinct snapshot (decoded core + full raw) to sen_live for prediction.
 const senFilter = require('./sen_filter');
 try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', e.message); }
+// index for per-hour weather lookups (weather PK starts with `point`, so ts_utc filters were full scans ~230ms)
+try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } catch (e) { /* table may not exist yet */ }
 let senFilterCache = { at: 0, data: null };
 async function liveSenFilter(maxAge = 10000) {
   if (senFilterCache.data && Date.now() - senFilterCache.at < maxAge) return senFilterCache.data;
@@ -1021,6 +1156,19 @@ async function predictPage(date) {
   const cfg = loadConfig(); const [wh0, wh1] = cfg.trade_window_cet || [7, 22];
   const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4;
   const nowInfo = roDateIsp(new Date()); const nowMs = Date.now();
+  // INTRADAY TRADE GATE (75-min lead, snapped to the current ISP boundary): an interval is tradeable only once its
+  // delivery start is ≥75 min away. At 11:15 → open from 12:30; once 11:15 closes (11:30) → open from 12:45 (advances
+  // each ISP). Per-row state by absolute time so it's date-general: past (before the current ISP) / locked (current ISP
+  // through the gate) / open (≥ gate). gate = (start of current ISP) + 75 min = first tradeable delivery start.
+  const LOCK_LEAD_MIN = 75;
+  const curIspTs = dayTimestamps(nowInfo.date).find((t) => t.isp === nowInfo.isp);
+  const curIspStartMs = curIspTs ? new Date(curIspTs.ts).getTime() : nowMs;
+  const gateMs = curIspStartMs + LOCK_LEAD_MIN * 60000;
+  const firstOpenIsp = nowInfo.isp + LOCK_LEAD_MIN / 15; // current ISP + 5
+  const gateCet = firstOpenIsp <= 96 ? cetLabel(firstOpenIsp) : '00:00<small>+1d</small>';
+  const gateCaption = nowInfo.date === date
+    ? `<b>Trade gate</b> · ${LOCK_LEAD_MIN}-min lead — <span class="op">▶ trade window opens at ${gateCet}</span>, locks in <span class="ivtimer" data-end="${curIspStartMs + 900000}">–:––</span> · <span class="lk">🔒 nearer intervals locked</span> · <span style="opacity:.6">grey = delivered</span>`
+    : (date < nowInfo.date ? '<b>Past day</b> — all intervals delivered' : '<b>Future day</b> — all intervals open to trade');
   const schedVal = (o) => { if (!o || typeof o !== 'object') return null; let v = rnum(o.commercial); if (v === null) { const da = rnum(o.dayAhead), id = rnum(o.intraday); if (da !== null || id !== null) v = (da ?? 0) + (id ?? 0); } return v; };
   const notifXB = (x) => { if (!x) return null; let net = 0, any = false; for (const p of ['hu', 'bg', 'rs', 'ua', 'md']) { const e = schedVal(x['ro' + p]), i = schedVal(x[p + 'ro']); if (e !== null) { net += e; any = true; } if (i !== null) { net -= i; any = true; } } return any ? net : null; };
   // net cross-border (export − import) using a SPECIFIC schedule component (dayAhead | intraday)
@@ -1030,10 +1178,30 @@ async function predictPage(date) {
   // forecast deviation cell (upcoming): forecast Real − Notif, shown italic to mark it's a forecast not a measured delta
   const dltF = (v, tip) => (v === null ? '' : `<span style="font-style:italic;opacity:.7" title="${tip}"><span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span></span>`);
   const arrow = (v) => (v === null ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
+  // warmth heatmap on a cell by the interval-to-interval change magnitude: ~0 = no tint, ~100 = faint amber, ~400 = hot red.
+  // Lets the trader spot steep ramps in the notified schedules at a glance. Returns an inline style attribute (or '').
+  const warmth = (cur, prev) => {
+    if (cur === null || prev === null) return '';
+    const d = Math.abs(cur - prev);
+    if (d < 40) return ''; // negligible change — leave plain
+    const t = Math.min(1, (d - 40) / 410); // 40 MW → 0, 450+ MW → 1
+    const h = Math.round(48 - 40 * t);      // hue: amber 48° (small) → red 8° (big)
+    const a = (0.14 + 0.5 * t).toFixed(2);  // alpha grows with the change
+    return ` style="background:hsla(${h},92%,52%,${a})"`; // NON-important so row highlights (now/gate/last-closed, all !important) still win
+  };
 
   let lastRealIsp = null;
   for (const { isp, ts } of dayTimestamps(date)) { const r = P.get(isp); if (new Date(ts).getTime() + 900000 <= nowMs && r && rnum(r.estimatedSystemImbalance) !== null) lastRealIsp = isp; }
   const xbAgg = xbDeltaAgg(date); // recorded X-B Δ snapshots → interval-average + drift
+  const xbChg = xbPiChange(date); // last intraday change to Notif cross-border per interval (the PI trade: sold/bought)
+  let xbHist = new Set(); // intervals that have recorded PI-trade frames → show the ⓘ history popup icon
+  try { for (const r of db.prepare('SELECT DISTINCT isp FROM xb_pi_snap WHERE date_ro=?').all(date)) xbHist.add(r.isp); } catch { /* table missing */ }
+  const WX = weatherForDate(date); // Romania weather (cloud + 100m wind, real vs D-1 forecast) per UTC hour
+  // recorded per-interval SCADA time-weighted averages (sen_interval, finalized at interval end) — shown after a
+  // "|" on PAST Real X-B cells: "<realized value> | <computed average>".
+  senFilter.ensureIntervalTable(db);
+  const savedAvg = new Map();
+  try { for (const r of db.prepare('SELECT isp, avg_realxb FROM sen_interval WHERE date_ro=? AND avg_realxb IS NOT NULL').all(date)) savedAvg.set(r.isp, r.avg_realxb); } catch { /* table may be empty */ }
   // latest live "Sold schimb" reading — transelectrica shows the freshest sample even before the current ISP
   // is sampled (~10-min feed). Used for the current interval's Real X-B cell so it matches the homepage exactly.
   let latestSold = null;
@@ -1043,9 +1211,13 @@ async function predictPage(date) {
   const SF = nowInfo.date === date ? await liveSenFilter().catch(() => null) : null;
   const liveSold = SF && SF.sold !== null ? SF.sold : latestSold;
   const liveNotif = SF && SF.plan !== null ? -SF.plan : null; // Notif X-B (net export) = −PLAN
-  // interval average (net export) of every sen_live reading polled for the current interval
+  // the interval the live reading belongs to per its SCADA timestamp (lags the wall-clock interval by the feed
+  // delay) — the live value/colour/avg go in THIS row, not the wall-clock current one, until the SCADA clock reaches it.
+  const liveSi = SF && SF.ts ? senFilter.tsInterval(SF.ts) : null;
+  const liveIsp = nowInfo.date === date ? (liveSi && liveSi.date === date ? liveSi.isp : nowInfo.isp) : -1;
+  // interval average (net export, time-weighted) of the sen_live readings in the live (SCADA-time) interval
   let liveAvg = null, liveAvgN = 0;
-  if (nowInfo.date === date) { const tw = intervalTWA(date, nowInfo.isp); liveAvg = tw.avg; liveAvgN = tw.n; } // time-weighted by SCADA timestamps
+  if (liveIsp > 0) { const tw = intervalTWA(date, liveIsp); liveAvg = tw.avg; liveAvgN = tw.n; }
   if (liveAvg === null && liveSold !== null) liveAvg = -liveSold; // seed with the live value so it never blanks
 
   // --- Nowcast prediction of real prod/cons for upcoming (not-yet-settled) intervals ---
@@ -1085,10 +1257,10 @@ async function predictPage(date) {
     : `<span style="font-style:italic;opacity:.7" title="model nowcast · 80% CI ${fmt(pr.lo)}–${fmt(pr.hi)} MW">~${fmt(pr.pt)} <small>±${Math.round((pr.hi - pr.lo) / 2)}</small></span>`);
   // upcoming-cons predictor = LIVE nowcast: DAMAS day-ahead forecast + today's carried (real − forecast) gap
   const fcstPredCell = (v) => (v === null ? ''
-    : `<span style="font-style:italic;opacity:.7" title="live consumption nowcast = DAMAS day-ahead forecast + today's carried (real − forecast) gap — self-corrects to how the day is running. ±~170 MW">~${fmt(v)} <small>±170</small></span>`);
+    : `<span style="font-style:italic;opacity:.7" title="forecast consumption (DAMAS day-ahead + today's carried gap)">~${fmt(v)}</span>`);
   // upcoming Real prod = schedule-consistent forecast = Fcst cons + commercial net X-B (so prod − cons = the schedule)
   const fcstProdCell = (v) => (v === null ? ''
-    : `<span style="font-style:italic;opacity:.7" title="forecast generation = Fcst cons + the cross-border schedule (so it stays consistent with Real X-B). ±~200 MW">~${fmt(v)} <small>±200</small></span>`);
+    : `<span style="font-style:italic;opacity:.7" title="forecast generation (Fcst cons + the cross-border schedule)">~${fmt(v)}</span>`);
   // upcoming Real X-B = the LIVE commercial schedule (Notif X-B) — the best predictor of real net flow (~91 MW). Not differenced from noisy nowcasts.
   const fcstXBCell = (v) => (v === null ? ''
     : `<span style="font-style:italic;opacity:.75" title="Live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW error). Updates as intraday clears. The gap to reality = the imbalance, which only resolves at settlement. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
@@ -1101,16 +1273,17 @@ async function predictPage(date) {
     { h: 'Price', u: 'RON', help: 'Estimated imbalance price for the interval [RON/MWh].' },
     { h: 'Real prod', u: 'MW', help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a schedule-consistent forecast = Fcst cons + the cross-border schedule (so Real prod − Real cons = Real X-B). NOTE: an independent prod nowcast was tried but it badly mis-forecast the evening generation ramp (it can’t see the thermal/hydro ramp backing intraday exports), so the schedule-consistent version is used. Covers today + tomorrow.' },
     { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, the BRP plan published a day ahead. NOTE: notified production sits on a higher basis than SEN metered (~+185 MW), so read Prod Δ as a TREND, not an exact shortfall; the live Real-prod nowcast corrects today’s gap.' },
+    { h: 'Weather', u: '100m km/h', help: 'Romania weather (ensemble mean of ECMWF/ICON/GFS across 4 regions: Dobrogea ×2 wind belt, Bucharest, Oltenia). Sky icon ☀️🌤️⛅☁️ from cloud cover. 💨 = wind speed at 100m (turbine hub height), km/h: the bold number is the latest run (≈ real for past hours, current forecast ahead); (parens) = the day-ahead (D-1) forecast when it differs ≥2. More wind → more wind generation (system longer); clearer sky → more solar.' },
     { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price). Upcoming (italic) = forecast deviation = Fcst prod − Notif prod.' },
     { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute). Upcoming intervals (~italic) show a LIVE nowcast = DAMAS day-ahead forecast (~2.6% MAPE) + today’s carried (real − forecast) gap, so it self-corrects to how the day is actually running (updates every 15s as intervals settle). Covers today + tomorrow.' },
     { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the BRP demand plan, frozen D-1 ~22:45 RO. Kept for reference and for the Notif bal plan-balance, but less accurate than the live Real-cons nowcast.' },
     { h: 'Cons Δ', u: 'MW', help: 'Real − Notified consumption (may carry a basis offset — read the movement). Rising = demand gaining on plan → pushes the system SHORT (deficit, higher price). Upcoming (italic) = forecast deviation = Fcst cons − Notif cons.' },
-    { h: 'Real X-B', u: 'MW', help: 'Settled: live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. Upcoming (italic): the live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW MAE, validated; far better than differencing the prod/cons nowcasts). Updates as intraday (PI) clears. The gap between this and reality IS the imbalance, which only resolves at settlement.' },
-    { h: 'Notif X-B', u: 'MW', help: 'Notified (commercial) cross-border — the FULL netted rollup. ↑ = export, ↓ = import. Updates intraday as PI border trades clear. Identity (holds exactly): Notif X-B = X-B D-1 + X-B PI + X-B LT.' },
-    { h: 'X-B D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
-    { h: 'X-B PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
-    { h: 'X-B LT', u: 'MW', help: 'Long-term component of the notified cross-border (yearly + monthly capacity rights, nominated ahead of the day-ahead auction). Slowly varying — usually a steady net import on RO’s borders. This is the leg that makes Notif X-B ≠ D-1 + PI: Notif X-B = X-B D-1 + X-B PI + X-B LT. ↑ = export, ↓ = import.' },
-    { h: 'X-B Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
+    { h: 'Real Cross border', u: 'MW', help: 'Settled: live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. Upcoming (italic): the live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW MAE, validated; far better than differencing the prod/cons nowcasts). Updates as intraday (PI) clears. The gap between this and reality IS the imbalance, which only resolves at settlement.' },
+    { h: 'Notif Cross border', u: 'MW', help: 'Notified (commercial) cross-border — the FULL netted rollup. ↑ = export, ↓ = import. Updates intraday as PI border trades clear. Identity (holds exactly): Notif X-B = X-B D-1 + X-B PI + X-B LT.' },
+    { h: 'Cross border D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
+    { h: 'Cross border PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
+    { h: 'Cross border LT', u: 'MW', help: 'Long-term component of the notified cross-border (yearly + monthly capacity rights, nominated ahead of the day-ahead auction). Slowly varying — usually a steady net import on RO’s borders. This is the leg that makes Notif X-B ≠ D-1 + PI: Notif X-B = X-B D-1 + X-B PI + X-B LT. ↑ = export, ↓ = import.' },
+    { h: 'Cross border Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
     { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
   ];
   const head = COLS.map((c) => `<th>${c.h}<br><small>${c.u}</small> <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span></th>`).join('');
@@ -1118,6 +1291,7 @@ async function predictPage(date) {
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
+    const isLive = isp === liveIsp; // the interval the live Transelectrica reading belongs to (by SCADA time)
     const p = P.get(isp), g = G.get(isp), c = C.get(isp), x = X.get(isp), e = E.get(isp);
     const imb = p ? rnum(p.estimatedSystemImbalance) : null;
     const price = p ? rnum(p.estimatedPricePositiveImbalance) : null;
@@ -1131,6 +1305,11 @@ async function predictPage(date) {
     const fcstConsBase = c ? rnum(c.grossForecastConsumption) : null; // DAMAS day-ahead forecast
     const fcstCons = fcstConsBase !== null ? fcstConsBase + consDamasGap : null; // LIVE: DAMAS + today's carried gap
     const rxb = sen ? -sen.sold : null, nxb = notifXB(x); // SEN sold = cons−prod; −sold = net export
+    // previous interval's notified values, for the warmth (interval-to-interval change) heatmap on the notif columns
+    const gPrev = G.get(isp - 1);
+    const prevNotifProd = gPrev ? rnum(gPrev.brpsProduction) : null;
+    const prevNotifCons = gPrev ? rnum(gPrev.brpsConsumption) : null;
+    const prevNxb = notifXB(X.get(isp - 1));
     // Forward Real X-B = the live commercial schedule (best predictor of real net flow, ~91 MW MAE = the irreducible imbalance).
     // Backtest (14d): an independent prod/cons-derived X-B Δ was ~2× WORSE than this baseline (173 vs 91 MW; 3.5× at the
     // evening ramp), so the forward imbalance is NOT forecastable from prod/cons → X-B Δ is SETTLED-ONLY (realized imbalance);
@@ -1138,23 +1317,35 @@ async function predictPage(date) {
     const fcstProd = fcstCons !== null && nxb !== null ? fcstCons + nxb : null;
     const fcstXB = fcstProd !== null && fcstCons !== null ? fcstProd - fcstCons : null; // = nxb = live commercial schedule
     const xbDeltaVal = rxb !== null && nxb !== null ? rxb - nxb : null; // realized imbalance only; null (blank) forward
-    const lastClass = price !== null && price < 0 ? 'lastneg' : 'lastpos';
+    // realized surplus/deficit from the SCADA time-weighted interval AVERAGE (vs notif) — verified more accurate than
+    // the SENGrafic snapshot (MAE 81 vs 94 MW, S/D call +4..8pt, vs ENTSO-E settled flows). Preferred when available.
+    const xbDeltaAvg = savedAvg.has(isp) && nxb !== null ? savedAvg.get(isp) - nxb : null;
+    // LIVE current interval: Cross border Δ = real-time interval average − Notif cross border (the tracker refreshes it every 8s).
+    const xbDeltaLive = isLive && liveAvg !== null && liveNotif !== null ? liveAvg - liveNotif : null;
+    // colour the just-closed interval by its IMBALANCE (matches the Imbalance S/D column): surplus (imb>0) = green, deficit (imb<0) = red
+    const lastClass = imb !== null && imb < 0 ? 'lastneg' : 'lastpos';
     const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
-    return `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass}">
-      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>
+    // intraday trade-gate state for this interval (see gate setup above)
+    const tState = tsMs < curIspStartMs ? 'past' : (tsMs < gateMs ? 'locked' : 'open');
+    const gateBoundary = nowInfo.date === date && tsMs >= gateMs && tsMs - 900000 < gateMs; // first tradeable interval today
+    const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}">
+      <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">${gateBoundary ? '▾' : '▸'}</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
       <td>${imb !== null ? dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb)) : ''}</td>
-      <td>${price !== null ? fmt(price) : (epImb !== null ? provPriceSpan(epImb) : '')}</td>
-      <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td>${fmt(notifProd)}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : (fcstProd !== null && notifProd !== null ? dltF(fcstProd - notifProd, 'forecast prod deviation = Fcst prod − Notif prod (forecast Real − the notified plan)') : '')}</td>
-      <td>${realCons !== null ? fmt(realCons) : fcstPredCell(fcstCons)}</td><td>${fmt(notifCons)}</td><td>${realCons !== null && notifCons !== null ? dlt(realCons - notifCons) : (fcstCons !== null && notifCons !== null ? dltF(fcstCons - notifCons, 'forecast cons deviation = Fcst cons − Notif cons (forecast Real − the notified plan)') : '')}</td>
-      <td data-rxb="${isp}"${isCurrent && liveSold !== null && liveNotif !== null && -liveSold !== liveNotif ? ` style="background:${-liveSold > liveNotif ? 'rgba(26,158,87,.45)' : 'rgba(214,48,48,.45)'}!important"` : ''}>${isCurrent ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (rxb !== null ? arrow(rxb) : fcstXBCell(fcstXB))}</td><td>${arrow(nxb)}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td>${xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))}</td>
+      <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td>
+      <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}</td><td class="wx">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : ''}</td>
+      <td>${realCons !== null ? fmt(realCons) : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${realCons !== null && notifCons !== null ? dlt(realCons - notifCons) : ''}</td>
+      <td data-rxb="${isp}"${isLive && liveAvg !== null && liveNotif !== null && liveAvg !== liveNotif ? ` style="background:${liveAvg > liveNotif ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : ''}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (savedAvg.has(isp) ? arrow(savedAvg.get(isp)) : (rxb !== null ? arrow(rxb) : ''))}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}>${arrow(nxb)}${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
+    // the CURRENT TRADE row (gate = first tradeable, ~75 min ahead) is a 3-deep block: row 1 = today (above, as is),
+    // then the SAME interval on the previous 2 days for trade context.
+    return gateBoundary ? _row + histRowHtml(addDays(date, -1), isp, '−1d', false, true) + histRowHtml(addDays(date, -2), isp, '−2d', true, true) : _row;
   }).join('\n');
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
-${NAV('predict', date, null, colPicker('cols-predict', [], [6, 9, 12, 14, 16]))}<div class="content">
+${NAV('predict', date, null, colPicker('cols-predict', [], [7, 10, 13, 15, 17]))}<div class="content">
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
-<table><tr><th>Int</th><th>CET</th>${head}</tr>
+<table><caption class="gatecap">${gateCaption}</caption><tr><th>Int</th><th>CET</th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
   document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
@@ -1170,7 +1361,21 @@ ${body}</table></div>
       .then(function(html){
         var doc=new DOMParser().parseFromString(html,'text/html');
         var fresh=doc.querySelector('.content table'), cur=document.querySelector('.content table');
-        if(fresh&&cur){cur.innerHTML=fresh.innerHTML;if(window.__applyColHiding)window.__applyColHiding();}
+        if(fresh&&cur){
+          // capture old Notif cross-border values so we can FLASH any cell whose value changed (a PI trade cleared)
+          var oldNxb={}; cur.querySelectorAll('.nxbcell').forEach(function(c){oldNxb[c.dataset.isp]=c.dataset.v;});
+          cur.innerHTML=fresh.innerHTML;
+          if(window.__applyColHiding)window.__applyColHiding();
+          if(window.__reexpand)window.__reexpand(); // re-insert any user-expanded interval history (lost on table swap)
+          cur.querySelectorAll('.nxbcell').forEach(function(c){
+            var o=oldNxb[c.dataset.isp];
+            if(o!==undefined && o!=='' && o!==c.dataset.v && c.animate){ // value changed (PI trade) → bold 3-pulse blink
+              var sold=(+c.dataset.v)-(+o)>=0; // net export rose = SOLD (green) ; fell = BOUGHT (red)
+              var col=sold?'rgba(31,158,87,0.95)':'rgba(217,58,48,0.95)';
+              c.animate([{backgroundColor:col},{backgroundColor:'rgba(0,0,0,0)'},{backgroundColor:col},{backgroundColor:'rgba(0,0,0,0)'},{backgroundColor:col},{backgroundColor:'rgba(0,0,0,0)'}],{duration:3300,easing:'linear'}); // ~3 visible pulses over 3.3s
+            }
+          });
+        }
         var el=document.getElementById('rtstamp');if(el)el.textContent=new Date().toLocaleTimeString();
         dot('#1a9e57');
       })
@@ -1188,19 +1393,73 @@ ${body}</table></div>
   function ar(v){return v>=0?('↑'+Math.round(v)):('↓'+Math.round(-v));}
   function tick(){
     fetch('/api/realxb_now?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
-      if(j.isp==null||j.realxb==null)return;
-      if(last!==null&&last!==j.isp){var o=document.querySelector('td[data-rxb="'+last+'"] .rxblive');if(o)o.remove();} // freeze prior interval (keep its value + colour)
-      var c=document.querySelector('td[data-rxb="'+j.isp+'"]');
+      if(j.soldIsp==null||j.realxb==null)return;
+      if(last!==null&&last!==j.soldIsp){var o=document.querySelector('td[data-rxb="'+last+'"] .rxblive');if(o)o.remove();var or=document.querySelector('td[data-rxb="'+last+'"]');if(or&&or.parentElement)or.parentElement.classList.remove('liverow');} // freeze prior interval (keep its value + colour), drop its big-row treatment
+      var c=document.querySelector('td[data-rxb="'+j.soldIsp+'"]');
+      if(c&&c.parentElement)c.parentElement.classList.add('liverow'); // big-row treatment follows the live interval between refreshes
       if(c){
         c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+Math.round(j.notifxb)+' MW · '+new Date().toLocaleTimeString();
         c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'');
-        if(j.notifxb!=null){c.style.removeProperty('background');if(j.realxb!==j.notifxb)c.style.setProperty('background',j.realxb>j.notifxb?'rgba(26,158,87,.45)':'rgba(214,48,48,.45)','important');} // green over / red under Notif X-B (must beat the .now !important tint)
+        if(j.notifxb!=null&&j.avg!=null){c.style.removeProperty('background');if(j.avg!==j.notifxb)c.style.setProperty('background',j.avg>j.notifxb?'var(--tint-pos-strong)':'var(--tint-neg-strong)','important');} // colour by the interval AVERAGE vs Notif (steadier + verified more accurate than the instantaneous value vs ENTSO-E flows); same palette as the imbalance S/D column
         if(c.animate)c.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'}); // gentle blink on each refresh
       }
-      last=j.isp;
+      // Cross border Δ (live) for the current interval = real-time interval average − Notif cross border
+      var dc=document.querySelector('td[data-xbd="'+j.soldIsp+'"]');
+      if(dc&&j.avg!=null&&j.notifxb!=null){var d=Math.round(j.avg-j.notifxb);dc.innerHTML='<span class="'+(d>=0?'pos':'neg')+'" title="live: interval average − Notif cross border">'+(d>=0?'+':'')+d+'</span>';if(dc.animate)dc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      last=j.soldIsp;
     }).catch(function(){}).finally(function(){setTimeout(tick,8000);});
   }
   setTimeout(tick,1200);
+})();</script>
+<script>(function(){
+  // Live MM:SS countdown on every .ivtimer (the current trade interval's row + the caption): time until the current
+  // ISP closes — at 0 that trade interval locks and the gate advances. Re-queried each tick so it survives the 15s refresh.
+  function fmt(ms){ms=Math.max(0,ms);var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2);}
+  function tick(){var now=Date.now();document.querySelectorAll('.ivtimer').forEach(function(el){var end=+el.dataset.end;if(end)el.textContent=fmt(end-now);});}
+  setInterval(tick,1000);tick();
+})();</script>
+<script>(function(){
+  // per-row expand caret: lazily fetch + insert this interval's 2 historical rows (prev day, 2 days ago). Cached so it
+  // re-applies after the 15s refresh (which swaps the table). The trade row's history is server-rendered (green box).
+  var DATE=${JSON.stringify(date)}, cache={};
+  function insert(isp){
+    var c=document.querySelector('.exp[data-isp="'+isp+'"]'); if(!c)return; var row=c.closest('tr');
+    document.querySelectorAll('tr.histrow[data-pisp="'+isp+'"]').forEach(function(r){r.remove();}); // avoid dupes
+    row.insertAdjacentHTML('afterend', cache[isp]); row.classList.add('expanded'); c.textContent='▾';
+    if(window.__applyColHiding)window.__applyColHiding();
+  }
+  function collapse(isp){
+    document.querySelectorAll('tr.histrow[data-pisp="'+isp+'"]').forEach(function(r){r.remove();});
+    var c=document.querySelector('.exp[data-isp="'+isp+'"]'); if(c){c.textContent='▸';var r=c.closest('tr');if(r)r.classList.remove('expanded');}
+    delete cache[isp];
+  }
+  document.addEventListener('click',function(e){
+    var c=e.target.closest&&e.target.closest('.exp'); if(!c)return;
+    var isp=c.dataset.isp;
+    if(document.querySelector('tr.histrow[data-pisp="'+isp+'"]')){ collapse(isp); return; } // already open → close
+    if(cache[isp]){ insert(isp); return; }
+    fetch('/api/histrows?date='+DATE+'&isp='+isp,{cache:'no-store'}).then(function(r){return r.text();}).then(function(html){ cache[isp]=html; insert(isp); }).catch(function(){});
+  });
+  window.__reexpand=function(){ Object.keys(cache).forEach(insert); }; // called after each refresh
+})();</script>
+<div id="pimodal" class="pimodal"><div class="pimbox"><div class="pimhead"><b id="pimtitle"></b><span class="pimx" title="close">✕</span></div><div id="pimbody"></div></div></div>
+<script>(function(){
+  // ⓘ on a Notif cross-border cell → popup with that interval's full PI-trade history (every recorded change).
+  var DATE=${JSON.stringify(date)}, modal=document.getElementById('pimodal');
+  function close(){modal.classList.remove('open');}
+  modal.addEventListener('click',function(e){if(e.target===modal||e.target.classList.contains('pimx'))close();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+  document.addEventListener('click',function(e){
+    var i=e.target.closest&&e.target.closest('.pi-i'); if(!i)return;
+    var isp=i.dataset.isp;
+    document.getElementById('pimtitle').textContent='Loading…'; document.getElementById('pimbody').innerHTML=''; modal.classList.add('open');
+    fetch('/api/xbpi?date='+DATE+'&isp='+isp,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      document.getElementById('pimtitle').textContent='PI trades · interval '+j.isp+' ('+j.cet+' CET)'+(j.realized!=null?' · realized '+Math.round(j.realized)+' MWh '+(j.realized>0?'S':'D'):'');
+      if(!j.frames||!j.frames.length){document.getElementById('pimbody').innerHTML='<div style="opacity:.6;padding:8px">No PI trades recorded for this interval.</div>';return;}
+      var rows=j.frames.map(function(f){return '<tr><td>'+f.time+'</td><td>'+(f.commercial>=0?'↑':'↓')+Math.round(Math.abs(f.commercial))+'</td><td class="'+(f.deltaC>=0?'pos':'neg')+'">'+(f.deltaC==null?'·':(f.deltaC>=0?'+':'')+Math.round(f.deltaC))+'</td><td class="'+(f.action.indexOf('sold')===0?'pos':f.action?'neg':'')+'">'+f.action+'</td></tr>';}).join('');
+      document.getElementById('pimbody').innerHTML='<table><tr><th>Time (CET)</th><th>Notif X-B</th><th>Δ</th><th>Market</th></tr>'+rows+'</table><div style="opacity:.55;font-size:11px;margin-top:8px">Each row = a recorded change to the notified cross-border (an intraday PI trade). sold = net export rose, bought = net export fell.</div>';
+    }).catch(function(){document.getElementById('pimbody').innerHTML='<div style="opacity:.6;padding:8px">Could not load history.</div>';});
+  });
 })();</script>
 </body></html>`;
 }
@@ -1442,11 +1701,35 @@ const server = http.createServer(async (req, res) => {
       const sf = await liveSenFilter().catch(() => null);
       const sold = sf ? sf.sold : null;
       const notifxb = sf && sf.plan !== null ? -sf.plan : null;
-      // interval average (net export) of every sen_live reading polled for the current interval
+      // place the value in the interval its SCADA timestamp belongs to — lags the wall-clock interval by the feed
+      // delay (~1 min), so early in a new interval it stays in the PREVIOUS row until the SCADA clock reaches it.
+      const si = sf && sf.ts ? senFilter.tsInterval(sf.ts) : null;
+      const soldIsp = (isp && si && si.date === qd) ? si.isp : isp; // null when not viewing today
       let avg = null, navg = 0;
-      if (isp) { const tw = intervalTWA(ni.date, isp); avg = tw.avg; navg = tw.n; } // time-weighted by SCADA timestamps
-      if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks at interval start
-      return json({ isp, sold, realxb: sold !== null ? -sold : null, notifxb, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
+      if (soldIsp) { const tw = intervalTWA(qd, soldIsp); avg = tw.avg; navg = tw.n; } // time-weighted by SCADA timestamps
+      if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks
+      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
+    }
+    if (url.pathname === '/api/xbpi') {
+      // Full intraday history of the notified cross-border for one interval (the PI trades): every recorded frame
+      // with its step Δ (sold = net export rose, bought = fell). Powers the ⓘ popup on the Notif cross border cell.
+      const qd = url.searchParams.get('date') || today;
+      const isp = +url.searchParams.get('isp');
+      let frames = [];
+      try { frames = db.prepare('SELECT pulled_at, ts_utc, d1, pi, lt, commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? ORDER BY pulled_at').all(qd, isp); } catch { /* table missing */ }
+      const cetClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Europe/Berlin', hour: '2-digit', minute: '2-digit', hour12: false });
+      let prev = null;
+      const out = frames.map((f) => { const deltaC = prev == null ? null : f.commercial - prev; prev = f.commercial; return { time: cetClock(f.pulled_at), commercial: f.commercial, pi: f.pi, deltaC, action: deltaC == null || Math.abs(deltaC) < 1 ? '' : (deltaC > 0 ? 'sold ' + Math.round(deltaC) : 'bought ' + Math.round(-deltaC)) }; });
+      let realized = null;
+      if (frames.length) { try { const r = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND ts_utc=?").get(frames[0].ts_utc); realized = r ? r.value : null; } catch { /* ignore */ } }
+      let mm = (isp - 1) * 15 - 60; if (mm < 0) mm += 1440;
+      return json({ isp, cet: `${pad(Math.floor(mm / 60))}:${pad(mm % 60)}`, frames: out, realized });
+    }
+    if (url.pathname === '/api/histrows') {
+      // the 2 historical rows (same interval, prev day + 2 days ago) for the per-row expand caret on the Predict page
+      const qd = url.searchParams.get('date') || today;
+      const isp = +url.searchParams.get('isp');
+      return send(200, 'text/html', histRowHtml(addDays(qd, -1), isp, '−1d', false, false) + histRowHtml(addDays(qd, -2), isp, '−2d', true, false));
     }
     if (url.pathname === '/api/pzu') return json(pzuData(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pzu' || url.pathname === '/') return send(200, 'text/html', pzuPage(url.searchParams.get('date') || addDays(today, 1)));

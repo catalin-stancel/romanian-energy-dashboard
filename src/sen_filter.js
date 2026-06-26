@@ -30,6 +30,9 @@ const num = (v) => { const n = Number(v); return v !== null && v !== undefined &
 // Used to bucket readings into intervals by their TRUE data time (not our ~1-min-lagged record time) and to
 // time-weight the interval average. Shares the clock with server.js roWallMs()/tStart, so the tz offset cancels.
 const naiveMs = (s) => { const m = /(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+)/.exec(s || ''); return m ? Date.UTC(2000 + +m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null; };
+// the RO-day interval (date YYYY-MM-DD + isp 1..96) a SCADA timestamp belongs to — position in the local day,
+// no tz math. Used so the live Real-X-B value lands in the interval its SCADA time falls in, not the wall-clock one.
+const tsInterval = (s) => { const m = /(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+)/.exec(s || ''); if (!m) return null; return { date: (2000 + +m[1]) + '-' + String(+m[2]).padStart(2, '0') + '-' + String(+m[3]).padStart(2, '0'), isp: Math.floor((+m[4] * 60 + +m[5]) / 15) + 1 }; };
 
 async function fetchSenFilter() {
   const r = await fetch(URL + '?_=' + Date.now(), { headers: HDRS });
@@ -82,7 +85,11 @@ function intervalAvg(db, dateRo, isp) {
   const [Y, Mo, D] = dateRo.split('-').map(Number);
   const tStart = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + (isp - 1) * 900000;
   const tFull = tStart + 900000;
-  const tEnd = Math.min(tFull, Math.max(roWallMs(), tStart + 1)); // completed → full 15min; current → elapsed
+  // End the integration at the latest SCADA timestamp ("scada now"), NOT the wall clock — so the denominator is the
+  // seconds ELAPSED BY SCADA TIME (latest SCADA ts − interval start), and the last reading is never extrapolated
+  // across the feed's ~1-min lag. Past intervals: scadaNow >> tFull → full 15 min. Current: up to the freshest reading.
+  let scadaNow = tStart + 1; try { const r = db.prepare('SELECT MAX(ts_ms) m FROM sen_live WHERE ts_ms IS NOT NULL').get(); if (r && r.m) scadaNow = r.m; } catch { /* ignore */ }
+  const tEnd = Math.min(tFull, Math.max(scadaNow, tStart + 1)); // completed → full 15min; current → scada-elapsed
   let inWin, carry;
   try {
     inWin = db.prepare('SELECT ts_ms, sold FROM sen_live WHERE ts_ms >= ? AND ts_ms < ? AND sold IS NOT NULL ORDER BY ts_ms').all(tStart, tEnd);
@@ -136,4 +143,4 @@ function backfillIntervals(db, { maxNew = 500, refinishMin = 4 } = {}) {
   return n;
 }
 
-module.exports = { fetchSenFilter, ensureTable, record, naiveMs, intervalAvg, ensureIntervalTable, saveIntervalAvg, backfillIntervals, roWallMs, DECODE, URL };
+module.exports = { fetchSenFilter, ensureTable, record, naiveMs, tsInterval, intervalAvg, ensureIntervalTable, saveIntervalAvg, backfillIntervals, roWallMs, DECODE, URL };
