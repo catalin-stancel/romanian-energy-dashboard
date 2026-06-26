@@ -107,7 +107,7 @@ const xbDeltaCell = (agg, isp) => { // returns averaged-cell HTML, or null to le
 };
 
 // column visibility picker; selection persists in localStorage per page
-const colPicker = (key, mobileHidden) => `
+const colPicker = (key, mobileHidden, defaultHidden) => `
 <div class="colwrap r1"><button type="button" onclick="document.getElementById('colpanel').classList.toggle('open')">Columns ▾</button>
 <div id="colpanel" class="colpanel"></div></div>
 <script>window.addEventListener('DOMContentLoaded',function(){
@@ -115,17 +115,19 @@ const colPicker = (key, mobileHidden) => `
   var table=document.querySelector('.content table');
   if(!table)return;
   var head=[].map.call(table.rows[0].cells,function(c){return c.textContent.trim()});
-  // device default: phones start with a slim column set until the user picks their own
+  // default-hidden set: defaultHidden on every device + mobileHidden extras on phones (until the user picks own)
   var saved=localStorage.getItem(key);
-  var hidden=new Set(saved?JSON.parse(saved)
-    :(window.matchMedia('(max-width:760px)').matches?${JSON.stringify(mobileHidden || [])}:[]));
+  var dflt=${JSON.stringify(defaultHidden || [])}.concat(window.matchMedia('(max-width:760px)').matches?${JSON.stringify(mobileHidden || [])}:[]);
+  var hidden=new Set(saved?JSON.parse(saved):dflt);
   function apply(){
+    var n=table.rows[0]?table.rows[0].cells.length:0;
     for(var r=0;r<table.rows.length;r++){
       var row=table.rows[r];
-      if(row.cells.length!==head.length)continue;
+      if(row.cells.length!==n)continue;
       for(var i=0;i<row.cells.length;i++)row.cells[i].style.display=hidden.has(i)?'none':'';
     }
   }
+  window.__applyColHiding=apply; // single source of truth; partial-refresh pages call this after swapping rows
   var panel=document.getElementById('colpanel');
   head.forEach(function(h,i){
     var lab=document.createElement('label');
@@ -1150,7 +1152,7 @@ async function predictPage(date) {
   }).join('\n');
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
-${NAV('predict', date, null, colPicker('cols-predict'))}<div class="content">
+${NAV('predict', date, null, colPicker('cols-predict', [], [6, 9, 12, 14, 16]))}<div class="content">
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
 <table><tr><th>Int</th><th>CET</th>${head}</tr>
 ${body}</table></div>
@@ -1160,11 +1162,7 @@ ${body}</table></div>
 <script>(function(){
   // Near-realtime partial refresh: re-fetch this page, swap ONLY the table body in place (no full
   // reload → no flash, scroll kept), and re-apply the colPicker column hiding to the fresh cells.
-  var POLL=15000, KEY='cols-predict';
-  function applyCols(t){try{var s=localStorage.getItem(KEY);if(!s)return;var hid=new Set(JSON.parse(s));
-    var n=t.rows[0].cells.length;
-    for(var r=0;r<t.rows.length;r++){var row=t.rows[r];if(row.cells.length!==n)continue;
-      for(var i=0;i<row.cells.length;i++)row.cells[i].style.display=hid.has(i)?'none':'';}}catch(e){}}
+  var POLL=15000;
   function dot(c){var d=document.getElementById('rtdot');if(d)d.style.color=c;}
   function tick(){
     fetch(location.href,{cache:'no-store',headers:{'X-Requested-With':'rt'}})
@@ -1172,7 +1170,7 @@ ${body}</table></div>
       .then(function(html){
         var doc=new DOMParser().parseFromString(html,'text/html');
         var fresh=doc.querySelector('.content table'), cur=document.querySelector('.content table');
-        if(fresh&&cur){cur.innerHTML=fresh.innerHTML;applyCols(cur);}
+        if(fresh&&cur){cur.innerHTML=fresh.innerHTML;if(window.__applyColHiding)window.__applyColHiding();}
         var el=document.getElementById('rtstamp');if(el)el.textContent=new Date().toLocaleTimeString();
         dot('#1a9e57');
       })
