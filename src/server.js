@@ -379,10 +379,15 @@ const NAV = (active, date, refreshSec, extras) => `
     var m=document.getElementById('predlbl2');if(m)m.textContent=on?'ON':'OFF';}
   function togglePreds(){var off=document.documentElement.classList.toggle('preds-off');
     localStorage.setItem('showPreds',off?'0':'1');setPredLabel();}
+  // show/hide the per-source generation split (Real prod header switch); persisted per device
+  function toggleMix(){var off=document.documentElement.classList.toggle('mix-off');localStorage.setItem('showMix',off?'0':'1');}
+  // RES fcst column: weather icons (default) ⇄ RES generation forecast; persisted per device
+  function setResLabel(){var h=document.getElementById('reshdr');if(h)h.innerHTML=document.documentElement.classList.contains('res-on')?'RES fcst<br><small>MW</small>':'Weather<br><small>100m km/h</small>';}
+  function toggleRes(){var on=document.documentElement.classList.toggle('res-on');localStorage.setItem('showRes',on?'1':'0');setResLabel();}
   window.addEventListener('DOMContentLoaded',function(){
     var l=document.getElementById('thlabel');
     if(l)l.textContent=document.documentElement.dataset.theme;
-    setPredLabel();
+    setPredLabel();setResLabel();
   });
   document.addEventListener('click',function(e){
     var m=document.getElementById('mainmenu');
@@ -409,7 +414,7 @@ const NAV = (active, date, refreshSec, extras) => `
 // YellowGrid Design System (data/design/colors_and_type.css) — brand yellow as accent over a
 // themeable base. DARK is the default theme; html[data-theme='light'] restores the original
 // light palette. The inline script runs before CSS paint so there is no theme flash.
-const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off')</script>
+const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off');if((localStorage.getItem('showMix')||'0')!=='1')document.documentElement.classList.add('mix-off');if(localStorage.getItem('showRes')==='1')document.documentElement.classList.add('res-on')</script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
@@ -539,6 +544,26 @@ tr.hx .histlbl{background:var(--yg-yellow);color:var(--yg-black)}
 .pflag{cursor:help;font-size:12px;margin-left:3px;color:#e6a700} /* big PI repositioning on this interval */
 .pflag-x{color:var(--ic-d);font-weight:700} /* repositioning AGAINST the current state (possible flip) */
 .fc-s{color:var(--ic-s)} .fc-d{color:var(--ic-d)}
+/* SCADA generation split, inline after the Real prod total (| separator) */
+.prodmix{font-size:10px;font-weight:400;opacity:.85}
+.prodmix span{margin-right:6px;white-space:nowrap}
+html.mix-off .prodmix{display:none}
+/* RES generation forecast (solar/wind MW) under the weather in the Weather column */
+.resfc{font-size:10px;font-weight:400;opacity:.85;white-space:nowrap;margin-top:1px}
+.rlbl{opacity:.45;font-weight:700;margin-right:1px}
+/* RES fcst column toggle: default = weather icons (.wxw); switch ON = RES forecast (.wxr) */
+.wxr{display:none}
+html.res-on .wxw{display:none} html.res-on .wxr{display:inline}
+html:not(.res-on) #resscore{display:none!important}
+.restgl{cursor:pointer;display:inline-block;width:22px;height:12px;border-radius:7px;background:var(--border-2);position:relative;vertical-align:middle;margin-left:5px;transition:background .15s}
+.restgl::after{content:'';position:absolute;top:1px;left:1px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .15s}
+html.res-on .restgl{background:var(--ic-s)}
+html.res-on .restgl::after{left:11px}
+/* mini toggle switch in the Real prod header to show/hide the split */
+.mixtgl{cursor:pointer;display:inline-block;width:22px;height:12px;border-radius:7px;background:var(--ic-s);position:relative;vertical-align:middle;margin-left:5px;transition:background .15s}
+.mixtgl::after{content:'';position:absolute;top:1px;left:11px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .15s}
+html.mix-off .mixtgl{background:var(--border-2)}
+html.mix-off .mixtgl::after{left:1px}
 /* model predictions hidden by default (traders not yet briefed); header toggle flips html.preds-off */
 html.preds-off .fc-imb,html.preds-off .fc-lock,html.preds-off .pflag,html.preds-off #pulsebar,html.preds-off #scorebar{display:none!important}
 .predtgl{cursor:pointer} .predtgl.predon{color:var(--ic-s);font-weight:700}
@@ -1108,6 +1133,10 @@ try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', 
 const signModel = require('./sign_model');
 let signCache = { model: null, at: 0 };
 function getSignModel() { if (!signCache.model || Date.now() - signCache.at > 3600000) { try { signCache = { model: signModel.train(db), at: Date.now() }; } catch (e) { console.error('sign_model train:', e.message); } } return signCache.model; }
+// my weather→RES-generation model (challenger to ENTSO-E) — refit hourly
+const resModel = require('./res_model');
+let resCache = { model: null, at: 0 };
+function getResModel() { if (!resCache.model || Date.now() - resCache.at > 3600000) { try { resCache = { model: resModel.train(db), at: Date.now() }; } catch (e) { console.error('res_model train:', e.message); resCache = { model: null, at: Date.now() }; } } return resCache.model; }
 // Live regime anchors as of a publication-safe cutoff (= decision time for all upcoming intervals; matches training):
 //   persist = freshest settled imbalance; fracsurp = surplus-fraction of the last FRAC_W settled; netting = export−import.
 function liveRegime(cutoffMs) {
@@ -1268,6 +1297,9 @@ function pzuForecast(date) {
 // ---- Predict page: trader-facing real-vs-notified view (imbalance, prod, cons, cross-border) ----
 async function predictPage(date) {
   const SEN = await liveSEN(date).catch(() => new Map());
+  // per-interval SCADA generation mix (avg over the interval's sen_live readings) → the prod split on SETTLED rows
+  const senMix = new Map();
+  try { for (const r of db.prepare("SELECT isp, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu FROM sen_live WHERE date_ro=? AND solar IS NOT NULL GROUP BY isp").all(date)) senMix.set(r.isp, { solar: r.so, wind: r.wi, hydro: r.hy, nuclear: r.nu }); } catch { /* sen_live may be absent */ }
   const [P, E, G, C, X] = await Promise.all(
     ['estimatedImbalancePrices', 'estimatedPowerSystemImbalance', 'generationSchedules', 'dailyConsumptionOverview', 'scheduledExchanges']
       .map((c) => liveReport(c, date).catch(() => new Map())),
@@ -1316,6 +1348,53 @@ async function predictPage(date) {
   let xbHist = new Set(); // intervals that have recorded PI-trade frames → show the ⓘ history popup icon
   try { for (const r of db.prepare('SELECT DISTINCT isp FROM xb_pi_snap WHERE date_ro=?').all(date)) xbHist.add(r.isp); } catch { /* table missing */ }
   const WX = weatherForDate(date); // Romania weather (cloud + 100m wind, real vs D-1 forecast) per UTC hour
+  // per-interval RES generation forecast (ENTSO-E A69): prefer the intraday "current" run, fall back to day-ahead
+  const resFc = new Map();
+  try {
+    const tmp = {};
+    for (const r of db.prepare("SELECT isp, series, value FROM series WHERE date_ro=? AND series IN ('ws_fc_cur_solar','ws_fc_da_solar','ws_fc_cur_wind_onshore','ws_fc_da_wind_onshore')").all(date)) (tmp[r.isp] || (tmp[r.isp] = {}))[r.series] = r.value;
+    for (const isp of Object.keys(tmp)) { const t = tmp[isp]; resFc.set(+isp, { solar: t.ws_fc_cur_solar != null ? t.ws_fc_cur_solar : (t.ws_fc_da_solar != null ? t.ws_fc_da_solar : null), wind: t.ws_fc_cur_wind_onshore != null ? t.ws_fc_cur_wind_onshore : (t.ws_fc_da_wind_onshore != null ? t.ws_fc_da_wind_onshore : null) }); }
+  } catch { /* forecast series may be absent */ }
+  // MY weather→RES forecast per UTC hour (challenger to ENTSO-E). The model gives the BASE curve (diurnal shape);
+  // then an INTRADAY self-correction scales the whole curve by how today is actually running vs that base over the
+  // elapsed hours (multiplicative → preserves shape, stays 0 at night). Exceptional day → the rest of the curve lifts.
+  const myFc = new Map(); let solarScale = 1, windScale = 1;
+  try {
+    const resM = getResModel();
+    if (resM) {
+      const wRows = db.prepare("SELECT ts_utc, var, pulled_at, value FROM weather WHERE var IN ('shortwave_radiation','wind_speed_100m') AND ts_utc>=? AND ts_utc<? AND value IS NOT NULL").all(addDays(date, -1) + 'T20:00:00Z', addDays(date, 1) + 'T04:00:00Z');
+      const latest = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (!latest[k] || r.pulled_at > latest[k]) latest[k] = r.pulled_at; }
+      const agg = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (r.pulled_at !== latest[k]) continue; (agg[k] || (agg[k] = { s: 0, n: 0 })).s += r.value; agg[k].n++; }
+      const base = new Map();
+      for (const ts of new Set(wRows.map((r) => r.ts_utc))) { const rd = agg['shortwave_radiation|' + ts], wd = agg['wind_speed_100m|' + ts];
+        base.set(ts.slice(0, 13), { solar: rd ? resModel.predictSolar(resM, rd.s / rd.n) : null, wind: wd ? resModel.predictWind(resM, wd.s / wd.n) : null }); }
+      // intraday factor: today's realized (sen_live mix) vs base over ELAPSED daytime intervals (today only)
+      if (date === nowInfo.date) {
+        let aS = 0, bS = 0, aW = 0, bW = 0;
+        for (const { isp, ts } of dayTimestamps(date)) {
+          if (isp >= nowInfo.isp || isp < nowInfo.isp - 12) continue; // elapsed, last ~3h only (track the CURRENT regime, not the morning where the base is biased)
+          const b = base.get(new Date(ts).toISOString().slice(0, 13)), act = senMix.get(isp); if (!b || !act) continue;
+          if (b.solar != null && b.solar > 100 && act.solar != null) { aS += act.solar; bS += b.solar; }
+          if (b.wind != null && b.wind > 50 && act.wind != null) { aW += act.wind; bW += b.wind; }
+        }
+        if (bS > 200) solarScale = Math.max(0.5, Math.min(2, aS / bS));
+        if (bW > 100) windScale = Math.max(0.5, Math.min(2, aW / bW));
+      }
+      for (const [h, b] of base) myFc.set(h, { solar: b.solar != null ? b.solar * solarScale : null, wind: b.wind != null ? b.wind * windScale : null });
+    }
+  } catch { /* weather/model may be absent */ }
+  // RES forecast cell: ENTSO-E (E) line + my weather-model (M) line, M coloured vs ENTSO-E (green=I expect more, red=less)
+  const resCell = (e, m) => {
+    const r0 = (v) => (v != null ? Math.round(v) : null);
+    const eS = e ? r0(e.solar) : null, eW = e ? r0(e.wind) : null, mS = m ? r0(m.solar) : null, mW = m ? r0(m.wind) : null;
+    if (eS == null && eW == null && mS == null && mW == null) return '';
+    const col = (mv, ev) => (mv == null || ev == null ? '' : (mv > ev + 50 ? ' class="pos"' : mv < ev - 50 ? ' class="neg"' : ''));
+    const arr = solarScale > 1.05 ? '↑' : solarScale < 0.95 ? '↓' : '';
+    const mTip = `my weather-model forecast (MW): base curve × today's intraday factor (☀️×${solarScale.toFixed(2)}, 💨×${windScale.toFixed(2)}) measured from how today is running vs the base. Coloured vs ENTSO-E (green = I expect more, red = less).`;
+    const eLine = (eS != null || eW != null) ? `<div class="resfc" title="ENTSO-E A69 forecast (MW)"><span class="rlbl">E</span>${eS != null ? ' ☀️' + eS : ''}${eW != null ? ' 💨' + eW : ''}</div>` : '';
+    const mLine = (mS != null || mW != null) ? `<div class="resfc" title="${mTip}"><span class="rlbl">M${arr}</span>${mS != null ? ` <span${col(mS, eS)}>☀️${mS}</span>` : ''}${mW != null ? ` <span${col(mW, eW)}>💨${mW}</span>` : ''}</div>` : '';
+    return eLine + mLine;
+  };
   const signLock = new Map(); // locked (frozen-at-gate) sign forecast per interval — shown glued-right in the Imbalance cell
   try { for (const r of db.prepare('SELECT isp, p, sign, conf FROM sign_lock WHERE date_ro=?').all(date)) signLock.set(r.isp, r); } catch { /* table missing */ }
   // recorded per-interval SCADA time-weighted averages (sen_interval, finalized at interval end) — shown after a
@@ -1332,6 +1411,9 @@ async function predictPage(date) {
   const SF = nowInfo.date === date ? await liveSenFilter().catch(() => null) : null;
   const liveSold = SF && SF.sold !== null ? SF.sold : latestSold;
   const liveNotif = SF && SF.plan !== null ? -SF.plan : null; // Notif X-B (net export) = −PLAN
+  const liveProd = SF && SF.prod != null ? SF.prod : null; // live Transelectrica SCADA national generation (for the live row)
+  const liveCons = SF && SF.cons != null ? SF.cons : null; // live Transelectrica SCADA national consumption (for the live row)
+  const liveSolar = SF ? SF.solar : null, liveWind = SF ? SF.wind : null, liveHydro = SF ? SF.hydro : null, liveNuclear = SF ? SF.nuclear : null; // live SCADA generation mix (for the live-row prod split)
   // the interval the live reading belongs to per its SCADA timestamp (lags the wall-clock interval by the feed
   // delay) — the live value/colour/avg go in THIS row, not the wall-clock current one, until the SCADA clock reaches it.
   const liveSi = SF && SF.ts ? senFilter.tsInterval(SF.ts) : null;
@@ -1382,6 +1464,11 @@ async function predictPage(date) {
   // upcoming Real prod = schedule-consistent forecast = Fcst cons + commercial net X-B (so prod − cons = the schedule)
   const fcstProdCell = (v) => (v === null ? ''
     : `<span style="font-style:italic;opacity:.7" title="forecast generation (Fcst cons + the cross-border schedule)">~${fmt(v)}</span>`);
+  // live-row generation split from the SCADA feed: solar / wind / hydro / nuclear / other (coal+gas+biomass)
+  const prodMix = (prod, so, wi, hy, nu) => { if (prod == null) return '';
+    const o = Math.max(0, Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0)));
+    const s = (ic, v, t) => `<span title="${t}">${ic}${Math.round(v || 0)}</span>`;
+    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}<span title="other (coal/gas/biomass)">🔥${o}</span></span>`; };
   // upcoming Real X-B = the LIVE commercial schedule (Notif X-B) — the best predictor of real net flow (~91 MW). Not differenced from noisy nowcasts.
   const fcstXBCell = (v) => (v === null ? ''
     : `<span style="font-style:italic;opacity:.75" title="Live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW error). Updates as intraday clears. The gap to reality = the imbalance, which only resolves at settlement. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
@@ -1392,9 +1479,9 @@ async function predictPage(date) {
   const COLS = [
     { h: 'Imbalance', u: 'MWh', help: 'Estimated system imbalance, SETTLED intervals only. S (blue) = surplus / system long → low or negative price. D (orange) = deficit / system short → high price. Blank forward on purpose: the forward imbalance depends on how the market plays out intraday — a 2yr walk-forward (tool/xb_phase1.js) showed persistence and every feature tried add no usable forward skill, so we do not forecast it.' },
     { h: 'Price', u: 'RON', help: 'Estimated imbalance price for the interval [RON/MWh].' },
-    { h: 'Real prod', u: 'MW', help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a schedule-consistent forecast = Fcst cons + the cross-border schedule (so Real prod − Real cons = Real X-B). NOTE: an independent prod nowcast was tried but it badly mis-forecast the evening generation ramp (it can’t see the thermal/hydro ramp backing intraday exports), so the schedule-consistent version is used. Covers today + tomorrow.' },
+    { h: 'Real prod', u: 'MW', mix: true, help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a schedule-consistent forecast = Fcst cons + the cross-border schedule (so Real prod − Real cons = Real X-B). NOTE: an independent prod nowcast was tried but it badly mis-forecast the evening generation ramp (it can’t see the thermal/hydro ramp backing intraday exports), so the schedule-consistent version is used. Covers today + tomorrow.' },
     { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, the BRP plan published a day ahead. NOTE: notified production sits on a higher basis than SEN metered (~+185 MW), so read Prod Δ as a TREND, not an exact shortfall; the live Real-prod nowcast corrects today’s gap.' },
-    { h: 'Weather', u: '100m km/h', help: 'Romania weather (ensemble mean of ECMWF/ICON/GFS across 4 regions: Dobrogea ×2 wind belt, Bucharest, Oltenia). Sky icon ☀️🌤️⛅☁️ from cloud cover. 💨 = wind speed at 100m (turbine hub height), km/h: the bold number is the latest run (≈ real for past hours, current forecast ahead); (parens) = the day-ahead (D-1) forecast when it differs ≥2. More wind → more wind generation (system longer); clearer sky → more solar.' },
+    { h: 'Weather', u: '100m km/h', res: true, help: 'DEFAULT: Romania weather — sky icon (cloud) + 💨 wind speed at 100m (km/h), ensemble mean across 4 RO regions. Flip the switch to show the RES generation FORECAST instead (MW): E = ENTSO-E A69; M = my weather-model (intraday-adjusted, coloured vs E — green = I expect more, red = less). ☀️ solar / 💨 wind. Toggle is per-device, default off.' },
     { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price). Upcoming (italic) = forecast deviation = Fcst prod − Notif prod.' },
     { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute). Upcoming intervals (~italic) show a LIVE nowcast = DAMAS day-ahead forecast (~2.6% MAPE) + today’s carried (real − forecast) gap, so it self-corrects to how the day is actually running (updates every 15s as intervals settle). Covers today + tomorrow.' },
     { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the BRP demand plan, frozen D-1 ~22:45 RO. Kept for reference and for the Notif bal plan-balance, but less accurate than the live Real-cons nowcast.' },
@@ -1407,7 +1494,7 @@ async function predictPage(date) {
     { h: 'Cross border Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
     { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
   ];
-  const head = COLS.map((c) => `<th>${c.h}<br><small>${c.u}</small> <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span></th>`).join('');
+  const head = COLS.map((c) => `<th>${c.res ? '<span id="reshdr">' + c.h + '<br><small>' + c.u + '</small></span>' : c.h + '<br><small>' + c.u + '</small>'} <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span>${c.mix ? '<span class="mixtgl" onclick="toggleMix()" title="show/hide the per-source generation split (solar/wind/hydro/nuclear/other)"></span>' : ''}${c.res ? '<span class="restgl" onclick="toggleRes()" title="toggle: weather icons ⇄ RES generation forecast (ENTSO-E vs my model)"></span>' : ''}</th>`).join('');
 
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
@@ -1422,6 +1509,11 @@ async function predictPage(date) {
     const realProd = sen ? sen.prod : null;
     const notifProd = g ? rnum(g.brpsProduction) : null;
     const realCons = sen ? sen.cons : null;
+    // the live (current) row shows the freshest Transelectrica SCADA prod/cons; settled rows use the SEN interval value
+    const dispProd = (isLive && liveProd !== null) ? liveProd : realProd;
+    const dispCons = (isLive && liveCons !== null) ? liveCons : realCons;
+    // generation mix for the prod split: live SCADA on the live row, per-interval sen_live average on settled rows
+    const mx = isLive ? (liveProd !== null ? { solar: liveSolar, wind: liveWind, hydro: liveHydro, nuclear: liveNuclear } : null) : senMix.get(isp);
     const notifCons = g ? rnum(g.brpsConsumption) : null;
     const fcstConsBase = c ? rnum(c.grossForecastConsumption) : null; // DAMAS day-ahead forecast
     const fcstCons = fcstConsBase !== null ? fcstConsBase + consDamasGap : null; // LIVE: DAMAS + today's carried gap
@@ -1458,9 +1550,9 @@ async function predictPage(date) {
         return '';
       })()}</td>
       <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td>
-      <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}</td><td class="wx">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : ''}</td>
-      <td>${realCons !== null ? fmt(realCons) : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${realCons !== null && notifCons !== null ? dlt(realCons - notifCons) : ''}</td>
-      <td data-rxb="${isp}"${isLive && liveAvg !== null && nxb !== null && liveAvg !== nxb ? ` style="background:${liveAvg > nxb ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : ''}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (savedAvg.has(isp) ? arrow(savedAvg.get(isp)) : (rxb !== null ? arrow(rxb) : ''))}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}>${arrow(nxb)}${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
+      <td data-rprod="${isp}">${dispProd !== null ? fmt(dispProd) : fcstProdCell(fcstProd)}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)))}</span></td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
+      <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
+      <td data-rxb="${isp}"${isLive && liveAvg !== null && nxb !== null && liveAvg !== nxb ? ` style="background:${liveAvg > nxb ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : ''}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (savedAvg.has(isp) ? arrow(savedAvg.get(isp)) : (rxb !== null ? arrow(rxb) : ''))}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
     // the CURRENT TRADE row (gate = first tradeable, ~75 min ahead) is a 3-deep block: row 1 = today (above, as is),
@@ -1473,6 +1565,7 @@ ${NAV('predict', date, null, colPicker('cols-predict', [], [7, 10, 13, 15, 17]))
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
 <div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
+<div id="resscore" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <table><caption class="gatecap">${gateCaption}</caption><tr><th>Int</th><th>CET</th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
@@ -1527,16 +1620,23 @@ ${body}</table></div>
       var c=document.querySelector('td[data-rxb="'+j.soldIsp+'"]');
       if(c&&c.parentElement)c.parentElement.classList.add('liverow'); // big-row treatment follows the live interval between refreshes
       // colour & Δ against the DISPLAYED Notif cross border (DAMAS nxb, in the adjacent cell's data-v) so they agree with the row — NOT the sen-filter PLAN (the two feeds differ)
-      var nc=document.querySelector('td.nxbcell[data-isp="'+j.soldIsp+'"]'); var notif=(nc&&nc.dataset.v!=='')?+nc.dataset.v:j.notifxb;
+      var nc=document.querySelector('td.nxbcell[data-isp="'+j.soldIsp+'"]');
+      // LIVE notif = freshest PI commercial (per poll) so notif + Δ track real time; fall back to the rendered cell, then sen-filter plan
+      var notif=(j.notifPi!=null)?j.notifPi:((nc&&nc.dataset.v!=='')?+nc.dataset.v:j.notifxb);
+      if(nc&&j.notifPi!=null){nc.dataset.v=Math.round(j.notifPi);var nv=nc.querySelector('.nxbval');if(nv)nv.textContent=ar(j.notifPi);}
       if(c){
         c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+(notif!=null?Math.round(notif):'?')+' MW · '+new Date().toLocaleTimeString();
         c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'');
-        if(notif!=null&&j.avg!=null){c.style.removeProperty('background');if(j.avg!==notif)c.style.setProperty('background',j.avg>notif?'var(--tint-pos-strong)':'var(--tint-neg-strong)','important');} // colour by the interval AVERAGE vs the DISPLAYED Notif; same palette as the imbalance S/D column
+        if(notif!=null&&j.avg!=null){c.style.removeProperty('background');if(j.avg!==notif)c.style.setProperty('background',j.avg>notif?'var(--tint-pos-strong)':'var(--tint-neg-strong)','important');} // colour by the interval AVERAGE vs live Notif (matches the live Δ sign)
         if(c.animate)c.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'}); // gentle blink on each refresh
       }
-      // Cross border Δ (live) for the current interval = real-time interval average − Notif cross border
+      // live Real prod / Real cons for the current interval = freshest Transelectrica SCADA reading
+      function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+'<span title="other (coal/gas/biomass)">🔥'+o+'</span></span>';}
+      var pc=document.querySelector('td[data-rprod="'+j.soldIsp+'"]'); if(pc&&j.prod!=null){pc.innerHTML=Math.round(j.prod).toLocaleString('en-US')+mixHtml(j);if(pc.animate)pc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      var cc=document.querySelector('td[data-rcons="'+j.soldIsp+'"]'); if(cc&&j.cons!=null){cc.textContent=Math.round(j.cons).toLocaleString('en-US');if(cc.animate)cc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      // Cross border Δ (live) for the current interval = interval-AVERAGE real X-B (right of the |) − LIVE Notif cross border
       var dc=document.querySelector('td[data-xbd="'+j.soldIsp+'"]');
-      if(dc&&j.avg!=null&&notif!=null){var d=Math.round(j.avg-notif);dc.innerHTML='<span class="'+(d>=0?'pos':'neg')+'" title="live: interval average − Notif cross border">'+(d>=0?'+':'')+d+'</span>';if(dc.animate)dc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      if(dc&&j.avg!=null&&notif!=null){var d=Math.round(j.avg-notif);dc.innerHTML='<span class="'+(d>=0?'pos':'neg')+'" title="live: interval AVERAGE real X-B (right of the |) − live Notif cross border">'+(d>=0?'+':'')+d+'</span>';if(dc.animate)dc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       last=j.soldIsp;
     }).catch(function(){}).finally(function(){setTimeout(tick,8000);});
   }
@@ -1624,6 +1724,22 @@ ${body}</table></div>
     }).catch(function(){});
   }
   setInterval(paintScore,15000); setTimeout(paintScore,1200);
+})();</script>
+<script>(function(){
+  // RES forecast SCORECARD: running MAE of my base model (M) vs ENTSO-E (E) against actual generation. Lower = better.
+  var DATE=${JSON.stringify(date)};
+  function w(o,lbl){ if(!o)return ''; var win=o.me<o.entso; var lose=o.me>o.entso;
+    return lbl+' me <b style="color:'+(win?'#1a9e57':lose?'#d83a3a':'inherit')+'">'+o.me+'</b> vs E '+o.entso+' <small style="color:var(--fg-muted)">MAE</small>'; }
+  function paintRes(){
+    fetch('/api/res_score?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var el=document.getElementById('resscore'); if(!el)return; if(!j.ok||(!j.solar&&!j.wind)){el.style.display='none';return;}
+      el.style.display='block';
+      var parts=[]; if(j.solar)parts.push(w(j.solar,'☀️')); if(j.wind)parts.push(w(j.wind,'💨'));
+      var td=[]; if(j.todaySolar)td.push(w(j.todaySolar,'☀️')); if(j.todayWind)td.push(w(j.todayWind,'💨'));
+      el.innerHTML='<b>🎯 RES fcst accuracy</b> <small style="color:var(--fg-muted)">('+j.days+'d, lower MAE wins)</small> · '+parts.join(' · ')+(td.length?' <small style="color:var(--fg-muted)">| today</small> '+td.join(' · '):'');
+    }).catch(function(){});
+  }
+  setInterval(paintRes,60000); setTimeout(paintRes,1500);
 })();</script>
 <div id="pimodal" class="pimodal"><div class="pimbox"><div class="pimhead"><b id="pimtitle"></b><span class="pimx" title="close">✕</span></div><div id="pimbody"></div></div></div>
 <script>(function(){
@@ -1891,7 +2007,9 @@ const server = http.createServer(async (req, res) => {
       let avg = null, navg = 0;
       if (soldIsp) { const tw = intervalTWA(qd, soldIsp); avg = tw.avg; navg = tw.n; } // time-weighted by SCADA timestamps
       if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks
-      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
+      // live Notif X-B (DAMAS/PI commercial net export, freshest snapshot) so the client can refresh notif + Δ each poll
+      let notifPi = null; if (soldIsp) { try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(qd, soldIsp); if (r) notifPi = r.commercial; } catch { /* table may be absent */ } }
+      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, notifPi, prod: sf ? sf.prod : null, cons: sf ? sf.cons : null, solar: sf ? sf.solar : null, wind: sf ? sf.wind : null, hydro: sf ? sf.hydro : null, nuclear: sf ? sf.nuclear : null, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
     }
     if (url.pathname === '/api/pulse') {
       // LIVE system-state nowcast from the freshest SCADA (sen_live table → no extra source load): dev = sold − plan
@@ -1935,6 +2053,23 @@ const server = http.createServer(async (req, res) => {
       for (const l of locks) { const im = imbStmt.get(qd, l.isp); if (!im || im.value == null) continue; const act = im.value > 0 ? 'S' : 'D'; const ok = act === l.sign; if (ok) hit++; rows.push({ isp: l.isp, pred: l.sign, conf: l.conf, act, ok }); }
       let streak = 0; for (let k = rows.length - 1; k >= 0; k--) { if (!rows[k].ok) streak++; else break; }
       return json({ n: rows.length, hit, pct: rows.length ? Math.round(hit / rows.length * 100) : null, streak, last: rows.slice(-6) });
+    }
+    if (url.pathname === '/api/res_score') {
+      // E-vs-M-vs-actual RES scorecard: running MAE of ENTSO-E (E) and MY BASE model (M, no intraday peeking) against
+      // gen_actual solar/wind, over the last RES_DAYS + today. Fair forecast-quality comparison (both pure forecasts).
+      const resM = getResModel(); if (!resM) return json({ ok: false });
+      const qd = url.searchParams.get('date') || today; const RES_DAYS = 4;
+      const from = addDays(qd, -RES_DAYS) + 'T00:00:00Z', to = addDays(qd, 1) + 'T00:00:00Z';
+      const wRows = db.prepare("SELECT ts_utc,var,pulled_at,value FROM weather WHERE var IN ('shortwave_radiation','wind_speed_100m') AND ts_utc>=? AND ts_utc<? AND value IS NOT NULL").all(from, to);
+      const latest = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (!latest[k] || r.pulled_at > latest[k]) latest[k] = r.pulled_at; }
+      const agg = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (r.pulled_at !== latest[k]) continue; (agg[k] || (agg[k] = { s: 0, n: 0 })).s += r.value; agg[k].n++; }
+      const hg = (series) => { const m = {}; for (const r of db.prepare('SELECT ts_utc,value FROM series WHERE series=? AND ts_utc>=? AND ts_utc<? AND value IS NOT NULL').all(series, from, to)) { const h = r.ts_utc.slice(0, 13); (m[h] || (m[h] = { s: 0, n: 0 })).s += r.value; m[h].n++; } const o = {}; for (const h in m) o[h] = m[h].s / m[h].n; return o; };
+      const aS = hg('gen_actual_solar'), aW = hg('gen_actual_wind_onshore'), eS = hg('ws_fc_cur_solar'), eW = hg('ws_fc_cur_wind_onshore');
+      const acc = { sol: { m: 0, e: 0, n: 0 }, win: { m: 0, e: 0, n: 0 }, tSol: { m: 0, e: 0, n: 0 }, tWin: { m: 0, e: 0, n: 0 } };
+      for (const h in aS) { const rd = agg['shortwave_radiation|' + h + ':00:00Z']; if (!rd) continue; const mv = resModel.predictSolar(resM, rd.s / rd.n), a = aS[h], e = eS[h]; if (a == null || e == null || mv == null) continue; const td = h.slice(0, 10) === qd; acc.sol.m += Math.abs(mv - a); acc.sol.e += Math.abs(e - a); acc.sol.n++; if (td) { acc.tSol.m += Math.abs(mv - a); acc.tSol.e += Math.abs(e - a); acc.tSol.n++; } }
+      for (const h in aW) { const wd = agg['wind_speed_100m|' + h + ':00:00Z']; if (!wd) continue; const mv = resModel.predictWind(resM, wd.s / wd.n), a = aW[h], e = eW[h]; if (a == null || e == null || mv == null) continue; const td = h.slice(0, 10) === qd; acc.win.m += Math.abs(mv - a); acc.win.e += Math.abs(e - a); acc.win.n++; if (td) { acc.tWin.m += Math.abs(mv - a); acc.tWin.e += Math.abs(e - a); acc.tWin.n++; } }
+      const mae = (o) => (o.n ? { me: Math.round(o.m / o.n), entso: Math.round(o.e / o.n), n: o.n } : null);
+      return json({ ok: true, days: RES_DAYS, solar: mae(acc.sol), wind: mae(acc.win), todaySolar: mae(acc.tSol), todayWind: mae(acc.tWin) });
     }
     if (url.pathname === '/api/predict_sign') {
       // live forecast of the surplus/deficit SIGN + confidence for each UPCOMING interval. Fuses persistence
