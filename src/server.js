@@ -1329,7 +1329,7 @@ async function predictPage(date) {
     const tState = tsMs < curIspStartMs ? 'past' : (tsMs < gateMs ? 'locked' : 'open');
     const gateBoundary = nowInfo.date === date && tsMs >= gateMs && tsMs - 900000 < gateMs; // first tradeable interval today
     const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}">
-      <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">${gateBoundary ? '▾' : '▸'}</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
+      <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">▸</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
       <td>${imb !== null ? dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb)) : ''}</td>
       <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td>
       <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}</td><td class="wx">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : ''}</td>
@@ -1339,7 +1339,7 @@ async function predictPage(date) {
     </tr>`;
     // the CURRENT TRADE row (gate = first tradeable, ~75 min ahead) is a 3-deep block: row 1 = today (above, as is),
     // then the SAME interval on the previous 2 days for trade context.
-    return gateBoundary ? _row + histRowHtml(addDays(date, -1), isp, '−1d', false, true) + histRowHtml(addDays(date, -2), isp, '−2d', true, true) : _row;
+    return _row;
   }).join('\n');
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
@@ -1438,7 +1438,8 @@ ${body}</table></div>
     var isp=c.dataset.isp;
     if(document.querySelector('tr.histrow[data-pisp="'+isp+'"]')){ collapse(isp); return; } // already open → close
     if(cache[isp]){ insert(isp); return; }
-    fetch('/api/histrows?date='+DATE+'&isp='+isp,{cache:'no-store'}).then(function(r){return r.text();}).then(function(html){ cache[isp]=html; insert(isp); }).catch(function(){});
+    var row=c.closest('tr'); var g=(row&&row.classList.contains('gateopen'))?'&gate=1':'';
+    fetch('/api/histrows?date='+DATE+'&isp='+isp+g,{cache:'no-store'}).then(function(r){return r.text();}).then(function(html){ cache[isp]=html; insert(isp); }).catch(function(){});
   });
   window.__reexpand=function(){ Object.keys(cache).forEach(insert); }; // called after each refresh
 })();</script>
@@ -1729,7 +1730,8 @@ const server = http.createServer(async (req, res) => {
       // the 2 historical rows (same interval, prev day + 2 days ago) for the per-row expand caret on the Predict page
       const qd = url.searchParams.get('date') || today;
       const isp = +url.searchParams.get('isp');
-      return send(200, 'text/html', histRowHtml(addDays(qd, -1), isp, '−1d', false, false) + histRowHtml(addDays(qd, -2), isp, '−2d', true, false));
+      const gate = url.searchParams.get('gate') === '1'; // gateopen row → keep the green trade-box styling on expand
+      return send(200, 'text/html', histRowHtml(addDays(qd, -1), isp, '−1d', false, gate) + histRowHtml(addDays(qd, -2), isp, '−2d', true, gate));
     }
     if (url.pathname === '/api/pzu') return json(pzuData(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pzu' || url.pathname === '/') return send(200, 'text/html', pzuPage(url.searchParams.get('date') || addDays(today, 1)));
