@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { openDb, roDateIsp } = require('./db');
 
-const PORT = 8077;
+const PORT = process.env.PORT || 8077;
 const db = openDb();
 
 db.exec(`
@@ -273,7 +273,7 @@ const sv = (name, ts) => { const r = seriesAt.get(name, ts); return r ? r.value 
 function pzuData(date) {
   const cfg = loadConfig();
   const [h0, h1] = cfg.trade_window_cet;
-  const ispFrom = (h0 + 1) * 4 + 1, ispTo = (h1 + 1) * 4;
+  const ispFrom = (h0 + 1) * 4 + 1, ispTo = (h1 + 1) * 4 + 1; // +1 → include the wh1:00-starting row (e.g. 22:00)
   const lockAt = lockTimeFor(date).toISOString();
   const locked = isLocked(date);
 
@@ -350,6 +350,7 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
     <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'pilearn' ? 'on' : ''}" href="/pilearn">PI learn</a>
+    ${active === 'predict' ? '<a href="#" id="predtoggle" class="predtgl" title="show/hide the model sign predictions (kept off by default until traders are briefed)" onclick="togglePreds();return false">Predictions: OFF</a>' : ''}
     <a href="#" title="toggle dark/light theme" onclick="toggleTheme();return false">◐</a>
     <span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
   </div>
@@ -363,6 +364,7 @@ const NAV = (active, date, refreshSec, extras) => `
     <div class="menusep"></div>
     <a href="#" onclick="event.stopPropagation();var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
     <a href="#" onclick="toggleTheme();return false">Theme: <span id="thlabel"></span></a>
+    ${active === 'predict' ? '<a href="#" onclick="togglePreds();return false">Model predictions: <span id="predlbl2">OFF</span></a>' : ''}
     <div class="menusep"></div>
     <a href="/logout">Sign out</a>
   </div>
@@ -371,9 +373,16 @@ const NAV = (active, date, refreshSec, extras) => `
     document.documentElement.dataset.theme=t;localStorage.setItem('theme',t);
     var l=document.getElementById('thlabel');if(l)l.textContent=t;
   }
+  // model predictions show/hide (off by default; persisted per device in localStorage)
+  function setPredLabel(){var on=!document.documentElement.classList.contains('preds-off');
+    var b=document.getElementById('predtoggle');if(b){b.textContent='Predictions: '+(on?'ON':'OFF');b.classList.toggle('predon',on);}
+    var m=document.getElementById('predlbl2');if(m)m.textContent=on?'ON':'OFF';}
+  function togglePreds(){var off=document.documentElement.classList.toggle('preds-off');
+    localStorage.setItem('showPreds',off?'0':'1');setPredLabel();}
   window.addEventListener('DOMContentLoaded',function(){
     var l=document.getElementById('thlabel');
     if(l)l.textContent=document.documentElement.dataset.theme;
+    setPredLabel();
   });
   document.addEventListener('click',function(e){
     var m=document.getElementById('mainmenu');
@@ -400,7 +409,7 @@ const NAV = (active, date, refreshSec, extras) => `
 // YellowGrid Design System (data/design/colors_and_type.css) — brand yellow as accent over a
 // themeable base. DARK is the default theme; html[data-theme='light'] restores the original
 // light palette. The inline script runs before CSS paint so there is no theme flash.
-const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark'</script>
+const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off')</script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
@@ -524,6 +533,15 @@ tr.histrow.hx td:first-child{border-left:3px solid var(--yg-yellow)} tr.histrow.
 tr.expanded:not(.gateopen) td{border-top:3px solid var(--yg-yellow)} tr.expanded:not(.gateopen) td:first-child{border-left:3px solid var(--yg-yellow)} tr.expanded:not(.gateopen) td:last-child{border-right:3px solid var(--yg-yellow)}
 .histlbl{display:inline-block;background:var(--ic-s);color:#fff;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px}
 tr.hx .histlbl{background:var(--yg-yellow);color:var(--yg-black)}
+.fc-imb{font-style:italic;font-weight:600;font-size:12px;opacity:.9}.fc-imb small{font-weight:600;opacity:.7}
+.fc-lock{font-weight:700;font-size:11px;opacity:.95;border:1px solid var(--border-2);border-radius:5px;padding:0 4px} /* locked = boxed, not italic */
+.fc-r{float:right;margin-left:6px} /* glued to the right of the Imbalance cell */
+.pflag{cursor:help;font-size:12px;margin-left:3px;color:#e6a700} /* big PI repositioning on this interval */
+.pflag-x{color:var(--ic-d);font-weight:700} /* repositioning AGAINST the current state (possible flip) */
+.fc-s{color:var(--ic-s)} .fc-d{color:var(--ic-d)}
+/* model predictions hidden by default (traders not yet briefed); header toggle flips html.preds-off */
+html.preds-off .fc-imb,html.preds-off .fc-lock,html.preds-off .pflag,html.preds-off #pulsebar,html.preds-off #scorebar{display:none!important}
+.predtgl{cursor:pointer} .predtgl.predon{color:var(--ic-s);font-weight:700}
 .exp{cursor:pointer;display:inline-block;width:20px;height:20px;line-height:18px;text-align:center;font-size:12px;border:1px solid var(--border-2);border-radius:5px;color:var(--fg);background:var(--bg-subtle);user-select:none;margin-right:6px;vertical-align:middle}
 .exp:hover{border-color:var(--yg-yellow);background:var(--yg-yellow);color:var(--yg-black)}
 tr.expanded>td:first-child .exp,tr.gateopen>td:first-child .exp{border-color:var(--yg-yellow)}
@@ -821,7 +839,7 @@ function piPage(date) {
     : `${dirOnly(r.prob_long)} ${(Math.max(r.prob_long, 1 - r.prob_long) * 100).toFixed(0)}% <small>${fmt(r.price_p50)} RON</small>`;
 
   const [wh0, wh1] = cfg.trade_window_cet || [7, 22];
-  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4;
+  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4 + 1; // +1 → include the wh1:00-starting row (e.g. 22:00)
   const nowInfo = roDateIsp(new Date());
   const nowMs = Date.now();
   // last interval already settled with real data (gets the green highlight)
@@ -1086,6 +1104,107 @@ async function liveSEN(date, maxAge = 45000) {
 // live UI and RECORDS every distinct snapshot (decoded core + full raw) to sen_live for prediction.
 const senFilter = require('./sen_filter');
 try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', e.message); }
+// live sign predictor (P(surplus) per upcoming interval). Model trained on settled history, cached + retrained hourly.
+const signModel = require('./sign_model');
+let signCache = { model: null, at: 0 };
+function getSignModel() { if (!signCache.model || Date.now() - signCache.at > 3600000) { try { signCache = { model: signModel.train(db), at: Date.now() }; } catch (e) { console.error('sign_model train:', e.message); } } return signCache.model; }
+// Live regime anchors as of a publication-safe cutoff (= decision time for all upcoming intervals; matches training):
+//   persist = freshest settled imbalance; fracsurp = surplus-fraction of the last FRAC_W settled; netting = export−import.
+function liveRegime(cutoffMs) {
+  const cut = new Date(cutoffMs).toISOString();
+  const recent = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND value IS NOT NULL AND ts_utc<=? ORDER BY ts_utc DESC LIMIT ?").all(cut, signModel.FRAC_W);
+  if (!recent.length) return null;
+  const e = db.prepare("SELECT value FROM series WHERE series='damas_netting_export' AND value IS NOT NULL AND ts_utc<=? ORDER BY ts_utc DESC LIMIT 1").get(cut);
+  const i = db.prepare("SELECT value FROM series WHERE series='damas_netting_import' AND value IS NOT NULL AND ts_utc<=? ORDER BY ts_utc DESC LIMIT 1").get(cut);
+  return { persist: recent[0].value, fracsurp: recent.filter((r) => r.value > 0).length / recent.length, netting: e && i ? e.value - i.value : 0 };
+}
+// notif_bal for an upcoming interval = notif_prod − notif_cons − net_export_schedule (the "Notif bal" sign-model
+// feature). Forward schedules keyed by (date_ro, isp); returns null if prod/cons or all cross-border legs are absent.
+const _nbStmt = db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series IN ('damas_notif_prod','damas_notif_cons','sched_RO_HU','sched_RO_BG','sched_RO_RS','sched_RO_UA','sched_RO_MD','sched_HU_RO','sched_BG_RO','sched_RS_RO','sched_UA_RO','sched_MD_RO')");
+const _nbPi = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1');
+function notifBalFor(date, isp) {
+  const m = {}; try { for (const r of _nbStmt.all(date, isp)) m[r.series] = r.value; } catch { return null; }
+  const P = m.damas_notif_prod, C = m.damas_notif_cons; if (P == null || C == null) return null;
+  // net export: prefer the LIVE PI commercial (= the page's Notif X-B; moves intraday as trades land) so the forecast
+  // tracks the cross-border PI; fall back to the day-ahead schedule (same final value) when no PI snapshot exists.
+  let net = null; try { const pi = _nbPi.get(date, isp); if (pi && pi.commercial != null) net = pi.commercial; } catch { /* fall through */ }
+  if (net == null) { let e = 0, i = 0, any = false; for (const b of ['HU', 'BG', 'RS', 'UA', 'MD']) { const ev = m['sched_RO_' + b], iv = m['sched_' + b + '_RO']; if (ev != null) { e += ev; any = true; } if (iv != null) { i += iv; any = true; } } if (!any) return null; net = e - i; }
+  return P - C - net;
+}
+// LOCK the forecast at gate-close: the CURRENT TRADEABLE interval (the gate row = start ≥ current-ISP-start + 75min)
+// stays LIVE; once the gate advances past it (it becomes ISP+4, untradeable) its prediction freezes + is RECORDED
+// (append-only, lock-once) so it shows vs the realized outcome + can be scored. The gate row is NEVER locked.
+try { db.exec('CREATE TABLE IF NOT EXISTS sign_lock(date_ro TEXT, isp INTEGER, p REAL, sign TEXT, conf INTEGER, locked_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('sign_lock table:', e.message); }
+// PANIC / big-PI-move log: flag + RECORD upcoming tradeable intervals being repositioned hard, so we can finally
+// VALIDATE the desk's "a big PI trade flips the state" intuition (so far unconfirmed: big moves mostly CONFIRM the
+// state; flips n≈13, PI pointed the right way only ~38%). Observational only — no P adjustment until the log earns it.
+const PANIC_MW = 200, PANIC_WIN_MIN = 60; // a "panic" = |net commercial repositioning in the last PANIC_WIN_MIN min| ≥ PANIC_MW (≈p90 of recent-60min bursts) — a SUDDEN block, not slow multi-hour drift
+try { db.exec('CREATE TABLE IF NOT EXISTS panic_log(date_ro TEXT, isp INTEGER, first_at TEXT, pi_move REAL, pi_abs REAL, persist REAL, base_p REAL, pi_dir TEXT, persist_dir TEXT, opposes INTEGER, realized_dir TEXT, scored_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('panic_log table:', e.message); }
+function lockDueForecasts() {
+  const model = getSignModel(); if (!model) return;
+  const nowMs = Date.now(); const ni = roDateIsp(new Date());
+  const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
+  const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN; // first TRADEABLE delivery start (= current-ISP start + 75min), matches the trade-gate
+  const reg = liveRegime(nowMs - signModel.PUB_LAG * signModel.MIN); if (!reg) return; const persist = reg.persist;
+  const has = db.prepare('SELECT 1 FROM sign_lock WHERE date_ro=? AND isp=?');
+  const ins = db.prepare('INSERT OR IGNORE INTO sign_lock(date_ro,isp,p,sign,conf,locked_at) VALUES (?,?,?,?,?,?)');
+  const piStmt = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? ORDER BY pulled_at');
+  for (const { isp, ts } of dayTimestamps(ni.date)) {
+    if (isp < signModel.WIN_FROM || isp > signModel.WIN_TO) continue;
+    const Tms = new Date(ts).getTime();
+    if (Tms >= gateMs || Tms < gateMs - 15 * signModel.MIN) continue; // lock ONLY the interval that JUST became untradeable (old gate row → ISP+4): gate−15min ≤ start < gate. The gate row (≥ gate) stays live.
+    if (has.get(ni.date, isp)) continue;                 // lock once
+    let pi_move = 0; try { const fr = piStmt.all(ni.date, isp); if (fr.length >= 2) pi_move = fr[fr.length - 1].commercial - fr[0].commercial; } catch { /* ignore */ }
+    const lead = (Tms - nowMs) / signModel.MIN;
+    const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(ni.date, isp), isp, lead);
+    ins.run(ni.date, isp, +p.toFixed(4), p >= 0.5 ? 'S' : 'D', Math.round(Math.max(p, 1 - p) * 100), new Date().toISOString());
+  }
+}
+// net commercial repositioning on an interval within the last PANIC_WIN_MIN minutes (the "panic burst") — frames asc by pulled_at
+function recentMove(frames, nowMs) { if (frames.length < 2) return 0; const last = frames[frames.length - 1].c; let ref = frames[0].c; for (const f of frames) { if (f.p <= nowMs - PANIC_WIN_MIN * 60000) ref = f.c; else break; } return last - ref; }
+// Scan upcoming TRADEABLE intervals for a big RECENT PI burst; record the PEAK burst per interval (lock the realized
+// outcome later in scorePanics). pi_dir = S if the burst is net export (export→surplus-leaning) else D; opposes = pi_dir
+// disagrees with the persistence sign (the flip SETUP). Runs server-side so it logs whether or not a page is open.
+function detectPanics() {
+  const model = getSignModel(); if (!model) return;
+  const nowMs = Date.now(); const ni = roDateIsp(new Date());
+  const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
+  const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN;
+  const reg = liveRegime(nowMs - signModel.PUB_LAG * signModel.MIN); if (!reg) return;
+  const persistDir = reg.persist > 0 ? 'S' : 'D';
+  const piStmt = db.prepare('SELECT pulled_at, commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? ORDER BY pulled_at');
+  const sel = db.prepare('SELECT pi_abs FROM panic_log WHERE date_ro=? AND isp=?');
+  const ins = db.prepare('INSERT OR IGNORE INTO panic_log(date_ro,isp,first_at,pi_move,pi_abs,persist,base_p,pi_dir,persist_dir,opposes) VALUES (?,?,?,?,?,?,?,?,?,?)');
+  const upd = db.prepare('UPDATE panic_log SET pi_move=?,pi_abs=?,base_p=?,pi_dir=?,opposes=? WHERE date_ro=? AND isp=? AND realized_dir IS NULL');
+  for (const { isp, ts } of dayTimestamps(ni.date)) {
+    if (isp < signModel.WIN_FROM || isp > signModel.WIN_TO) continue;
+    const Tms = new Date(ts).getTime(); if (Tms < gateMs) continue; // tradeable only
+    let frames = []; try { frames = piStmt.all(ni.date, isp).map((f) => ({ p: Date.parse(f.pulled_at), c: f.commercial })); } catch { /* ignore */ }
+    if (frames.length < 2) continue;
+    const burst = recentMove(frames, nowMs); const pa = Math.abs(burst); if (pa < PANIC_MW) continue;
+    const pi_move = frames[frames.length - 1].c - frames[0].c; // cumulative repositioning — feeds the model prob
+    const lead = (Tms - nowMs) / signModel.MIN;
+    const p = signModel.prob(model, reg.persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(ni.date, isp), isp, lead);
+    const piDir = burst > 0 ? 'S' : 'D'; const opposes = piDir !== persistDir ? 1 : 0;
+    const ex = sel.get(ni.date, isp);
+    if (!ex) ins.run(ni.date, isp, new Date().toISOString(), burst, pa, reg.persist, +p.toFixed(4), piDir, persistDir, opposes);
+    else if (pa > ex.pi_abs) upd.run(burst, pa, +p.toFixed(4), piDir, opposes, ni.date, isp); // keep the PEAK burst
+  }
+}
+// Lock the realized surplus/deficit outcome onto logged panic events once the interval settles → builds the scored
+// dataset to test whether big PI moves predict flips (vs persistence) or merely confirm the state.
+function scorePanics() {
+  const rows = db.prepare('SELECT date_ro, isp FROM panic_log WHERE realized_dir IS NULL').all(); if (!rows.length) return;
+  const set = db.prepare('UPDATE panic_log SET realized_dir=?, scored_at=? WHERE date_ro=? AND isp=?');
+  for (const r of rows) {
+    const t = dayTimestamps(r.date_ro).find((x) => x.isp === r.isp); if (!t) continue;
+    const Tms = new Date(t.ts).getTime();
+    const v = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND value IS NOT NULL AND ts_utc>=? AND ts_utc<? LIMIT 1").get(new Date(Tms).toISOString(), new Date(Tms + 60000).toISOString());
+    if (v) set.run(v.value > 0 ? 'S' : 'D', new Date().toISOString(), r.date_ro, r.isp);
+  }
+}
+setInterval(() => { try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { console.error('sign loop:', e.message); } }, 60000);
+try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { /* ignore at startup */ }
 // index for per-hour weather lookups (weather PK starts with `point`, so ts_utc filters were full scans ~230ms)
 try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } catch (e) { /* table may not exist yet */ }
 let senFilterCache = { at: 0, data: null };
@@ -1154,7 +1273,7 @@ async function predictPage(date) {
       .map((c) => liveReport(c, date).catch(() => new Map())),
   );
   const cfg = loadConfig(); const [wh0, wh1] = cfg.trade_window_cet || [7, 22];
-  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4;
+  const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4 + 1; // +1 → include the wh1:00-starting row (e.g. 22:00)
   const nowInfo = roDateIsp(new Date()); const nowMs = Date.now();
   // INTRADAY TRADE GATE (75-min lead, snapped to the current ISP boundary): an interval is tradeable only once its
   // delivery start is ≥75 min away. At 11:15 → open from 12:30; once 11:15 closes (11:30) → open from 12:45 (advances
@@ -1197,6 +1316,8 @@ async function predictPage(date) {
   let xbHist = new Set(); // intervals that have recorded PI-trade frames → show the ⓘ history popup icon
   try { for (const r of db.prepare('SELECT DISTINCT isp FROM xb_pi_snap WHERE date_ro=?').all(date)) xbHist.add(r.isp); } catch { /* table missing */ }
   const WX = weatherForDate(date); // Romania weather (cloud + 100m wind, real vs D-1 forecast) per UTC hour
+  const signLock = new Map(); // locked (frozen-at-gate) sign forecast per interval — shown glued-right in the Imbalance cell
+  try { for (const r of db.prepare('SELECT isp, p, sign, conf FROM sign_lock WHERE date_ro=?').all(date)) signLock.set(r.isp, r); } catch { /* table missing */ }
   // recorded per-interval SCADA time-weighted averages (sen_interval, finalized at interval end) — shown after a
   // "|" on PAST Real X-B cells: "<realized value> | <computed average>".
   senFilter.ensureIntervalTable(db);
@@ -1321,7 +1442,7 @@ async function predictPage(date) {
     // the SENGrafic snapshot (MAE 81 vs 94 MW, S/D call +4..8pt, vs ENTSO-E settled flows). Preferred when available.
     const xbDeltaAvg = savedAvg.has(isp) && nxb !== null ? savedAvg.get(isp) - nxb : null;
     // LIVE current interval: Cross border Δ = real-time interval average − Notif cross border (the tracker refreshes it every 8s).
-    const xbDeltaLive = isLive && liveAvg !== null && liveNotif !== null ? liveAvg - liveNotif : null;
+    const xbDeltaLive = isLive && liveAvg !== null && nxb !== null ? liveAvg - nxb : null;
     // colour the just-closed interval by its IMBALANCE (matches the Imbalance S/D column): surplus (imb>0) = green, deficit (imb<0) = red
     const lastClass = imb !== null && imb < 0 ? 'lastneg' : 'lastpos';
     const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
@@ -1330,11 +1451,16 @@ async function predictPage(date) {
     const gateBoundary = nowInfo.date === date && tsMs >= gateMs && tsMs - 900000 < gateMs; // first tradeable interval today
     const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}">
       <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">▸</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
-      <td>${imb !== null ? dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb)) : ''}</td>
+      <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` : ''}${(() => {
+        if (nowInfo.date === date && tsMs >= gateMs && isp >= winFrom && isp <= winTo) return `<span class="fc-imb fc-r" data-fc="${isp}" title="live forecast (updates every 10s while tradeable — incl. the current tradeable interval)">·</span>`; // tradeable (start ≥ gate, incl. the gate row) → live
+        const lk = signLock.get(isp);
+        if (lk && isp >= winFrom && isp <= winTo) return `<span class="fc-lock fc-r fc-${lk.sign === 'S' ? 's' : 'd'}" title="forecast LOCKED at gate-close (untradeable) — recorded ${lk.conf}% ${lk.sign === 'S' ? 'surplus' : 'deficit'}">${lk.sign} ${lk.conf}%</span>`; // untradeable/settled → locked
+        return '';
+      })()}</td>
       <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td>
       <td>${realProd !== null ? fmt(realProd) : fcstProdCell(fcstProd)}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}</td><td class="wx">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</td><td>${realProd !== null && notifProd !== null ? dlt(realProd - notifProd) : ''}</td>
       <td>${realCons !== null ? fmt(realCons) : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${realCons !== null && notifCons !== null ? dlt(realCons - notifCons) : ''}</td>
-      <td data-rxb="${isp}"${isLive && liveAvg !== null && liveNotif !== null && liveAvg !== liveNotif ? ` style="background:${liveAvg > liveNotif ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : ''}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (savedAvg.has(isp) ? arrow(savedAvg.get(isp)) : (rxb !== null ? arrow(rxb) : ''))}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}>${arrow(nxb)}${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
+      <td data-rxb="${isp}"${isLive && liveAvg !== null && nxb !== null && liveAvg !== nxb ? ` style="background:${liveAvg > nxb ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : ''}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (savedAvg.has(isp) ? arrow(savedAvg.get(isp)) : (rxb !== null ? arrow(rxb) : ''))}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}>${arrow(nxb)}${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
     // the CURRENT TRADE row (gate = first tradeable, ~75 min ahead) is a 3-deep block: row 1 = today (above, as is),
@@ -1345,6 +1471,8 @@ async function predictPage(date) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
 ${NAV('predict', date, null, colPicker('cols-predict', [], [7, 10, 13, 15, 17]))}<div class="content">
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
+<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
+<div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <table><caption class="gatecap">${gateCaption}</caption><tr><th>Int</th><th>CET</th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
@@ -1367,6 +1495,7 @@ ${body}</table></div>
           cur.innerHTML=fresh.innerHTML;
           if(window.__applyColHiding)window.__applyColHiding();
           if(window.__reexpand)window.__reexpand(); // re-insert any user-expanded interval history (lost on table swap)
+          if(window.__paintForecast)window.__paintForecast(); // re-fill the upcoming-interval sign forecasts
           cur.querySelectorAll('.nxbcell').forEach(function(c){
             var o=oldNxb[c.dataset.isp];
             if(o!==undefined && o!=='' && o!==c.dataset.v && c.animate){ // value changed (PI trade) → bold 3-pulse blink
@@ -1397,15 +1526,17 @@ ${body}</table></div>
       if(last!==null&&last!==j.soldIsp){var o=document.querySelector('td[data-rxb="'+last+'"] .rxblive');if(o)o.remove();var or=document.querySelector('td[data-rxb="'+last+'"]');if(or&&or.parentElement)or.parentElement.classList.remove('liverow');} // freeze prior interval (keep its value + colour), drop its big-row treatment
       var c=document.querySelector('td[data-rxb="'+j.soldIsp+'"]');
       if(c&&c.parentElement)c.parentElement.classList.add('liverow'); // big-row treatment follows the live interval between refreshes
+      // colour & Δ against the DISPLAYED Notif cross border (DAMAS nxb, in the adjacent cell's data-v) so they agree with the row — NOT the sen-filter PLAN (the two feeds differ)
+      var nc=document.querySelector('td.nxbcell[data-isp="'+j.soldIsp+'"]'); var notif=(nc&&nc.dataset.v!=='')?+nc.dataset.v:j.notifxb;
       if(c){
-        c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+Math.round(j.notifxb)+' MW · '+new Date().toLocaleTimeString();
+        c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+(notif!=null?Math.round(notif):'?')+' MW · '+new Date().toLocaleTimeString();
         c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'');
-        if(j.notifxb!=null&&j.avg!=null){c.style.removeProperty('background');if(j.avg!==j.notifxb)c.style.setProperty('background',j.avg>j.notifxb?'var(--tint-pos-strong)':'var(--tint-neg-strong)','important');} // colour by the interval AVERAGE vs Notif (steadier + verified more accurate than the instantaneous value vs ENTSO-E flows); same palette as the imbalance S/D column
+        if(notif!=null&&j.avg!=null){c.style.removeProperty('background');if(j.avg!==notif)c.style.setProperty('background',j.avg>notif?'var(--tint-pos-strong)':'var(--tint-neg-strong)','important');} // colour by the interval AVERAGE vs the DISPLAYED Notif; same palette as the imbalance S/D column
         if(c.animate)c.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'}); // gentle blink on each refresh
       }
       // Cross border Δ (live) for the current interval = real-time interval average − Notif cross border
       var dc=document.querySelector('td[data-xbd="'+j.soldIsp+'"]');
-      if(dc&&j.avg!=null&&j.notifxb!=null){var d=Math.round(j.avg-j.notifxb);dc.innerHTML='<span class="'+(d>=0?'pos':'neg')+'" title="live: interval average − Notif cross border">'+(d>=0?'+':'')+d+'</span>';if(dc.animate)dc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      if(dc&&j.avg!=null&&notif!=null){var d=Math.round(j.avg-notif);dc.innerHTML='<span class="'+(d>=0?'pos':'neg')+'" title="live: interval average − Notif cross border">'+(d>=0?'+':'')+d+'</span>';if(dc.animate)dc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       last=j.soldIsp;
     }).catch(function(){}).finally(function(){setTimeout(tick,8000);});
   }
@@ -1442,6 +1573,57 @@ ${body}</table></div>
     fetch('/api/histrows?date='+DATE+'&isp='+isp+g,{cache:'no-store'}).then(function(r){return r.text();}).then(function(html){ cache[isp]=html; insert(isp); }).catch(function(){});
   });
   window.__reexpand=function(){ Object.keys(cache).forEach(insert); }; // called after each refresh
+})();</script>
+<script>(function(){
+  // LIVE SIGN FORECAST: fill upcoming Imbalance cells with predicted S/D + confidence%, refreshed every 10s
+  // (and right after the 15s table swap). Fuses persistence + time-of-day + PI order-flow (see sign_model.js).
+  var DATE=${JSON.stringify(date)};
+  function paint(){
+    fetch('/api/predict_sign?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var by={}; (j.rows||[]).forEach(function(r){by[r.isp]=r;});
+      document.querySelectorAll('.fc-imb').forEach(function(el){
+        var r=by[el.dataset.fc];
+        if(!r)return; // left the tradeable set (crossed the gate) → keep its last value; the 15s refresh renders it LOCKED
+        el.className='fc-imb fc-r '+(r.sign==='S'?'fc-s':'fc-d');
+        var pf=r.panic?(' <span class="pflag'+(r.panic.opposes?' pflag-x':'')+'" title="big PI repositioning ~'+r.panic.abs+' MW → '+(r.panic.dir==='S'?'export / surplus-leaning':'import / deficit-leaning')+(r.panic.opposes?' — AGAINST the current state (possible flip; logged for validation, not yet acted on)':' — confirms the current state')+'">⚠</span>'):'';
+        el.innerHTML=r.sign+' <small>'+r.conf+'%</small>'+pf;
+        el.title='forecast '+(r.sign==='S'?'surplus':'deficit')+' · '+r.conf+'% confidence (persistence + time-of-day + PI order-flow; updates as trades land)';
+      });
+    }).catch(function(){});
+  }
+  window.__paintForecast=paint;
+  setInterval(paint,10000); setTimeout(paint,1500);
+})();</script>
+<script>(function(){
+  function lbl(s){return s==='S'?'surplus':s==='D'?'deficit':'balanced';}
+  function paint(){
+    fetch('/api/pulse',{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var el=document.getElementById('pulsebar'); if(!el)return; if(!j.ok){el.style.display='none';return;}
+      el.style.display='block';
+      var col=j.scadaSign==='S'?'#1a9e57':j.scadaSign==='D'?'#d83a3a':'var(--fg-muted)';
+      var devTxt=Math.abs(j.dev)+' MW '+(j.dev>0?'over':'under')+' plan';
+      var trend=''; if(j.trend!=null&&j.scadaSign){var deepening=(j.trend>0)===(j.dev>0);trend=' · '+(Math.abs(j.trend)<15?'steady':(deepening?'deepening':'easing'));}
+      var anchorTxt=j.anchorSign?('last settled '+lbl(j.anchorSign)+' '+Math.abs(j.anchor)+' ('+j.anchorAgeMin+'m ago)'):'no recent settled value';
+      var turn=j.turn?' · <b style="color:#c8860a">⚠ disagrees with last settled — possible turn to '+lbl(j.scadaSign)+'</b>':'';
+      el.innerHTML='<b>⚡ Live pulse</b> <small style="color:var(--fg-muted)">('+j.ageS+'s ago, SCADA)</small> · <b style="color:'+col+'">'+lbl(j.scadaSign).toUpperCase()+'</b> lean <small style="color:var(--fg-muted)">('+devTxt+trend+')</small> · <small style="color:var(--fg-muted)">'+anchorTxt+'</small>'+turn;
+    }).catch(function(){});
+  }
+  setInterval(paint,10000); setTimeout(paint,1000);
+})();</script>
+<script>(function(){
+  // SELF-CHECK scorecard: how the model's LOCKED forecasts did vs realized TODAY + the trailing miss streak.
+  // Surfaces when the model is off-trend so forward calls get discounted (the forward probs already re-update each close).
+  var DATE=${JSON.stringify(date)};
+  function paintScore(){
+    fetch('/api/sign_score?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var el=document.getElementById('scorebar'); if(!el)return; if(!j.n){el.style.display='none';return;}
+      el.style.display='block';
+      var seq=(j.last||[]).map(function(s){return '<span title="isp '+s.isp+': predicted '+s.pred+' '+s.conf+'%, actual '+s.act+'" style="color:'+(s.ok?'#1a9e57':'#d83a3a')+';font-weight:700">'+(s.ok?'✓':'✗')+'</span>';}).join(' ');
+      var warn=j.streak>=3?' · <b style="color:#d83a3a">⚠ off-trend — '+j.streak+' straight misses; forward calls less reliable</b>':(j.streak===2?' · <b style="color:#c8860a">⚠ 2 misses in a row</b>':'');
+      el.innerHTML='<b>🧭 Model today</b> · <b>'+j.hit+'/'+j.n+'</b> <small style="color:var(--fg-muted)">('+j.pct+'%)</small> · <small style="color:var(--fg-muted)">recent</small> '+seq+warn;
+    }).catch(function(){});
+  }
+  setInterval(paintScore,15000); setTimeout(paintScore,1200);
 })();</script>
 <div id="pimodal" class="pimodal"><div class="pimbox"><div class="pimhead"><b id="pimtitle"></b><span class="pimx" title="close">✕</span></div><div id="pimbody"></div></div></div>
 <script>(function(){
@@ -1673,7 +1855,7 @@ const server = http.createServer(async (req, res) => {
       const [h0, h1] = cfg.trade_window_cet;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !Number.isInteger(isp)) return json({ ok: false, error: 'bad input' });
       if (isLocked(date)) return json({ ok: false, error: 'locked (use Unlock first)' });
-      if (isp < (h0 + 1) * 4 + 1 || isp > (h1 + 1) * 4) return json({ ok: false, error: 'outside trading window' });
+      if (isp < (h0 + 1) * 4 + 1 || isp > (h1 + 1) * 4 + 1) return json({ ok: false, error: 'outside trading window' });
       if (!Number.isFinite(qty) || Math.abs(qty) > cfg.max_mwh_per_isp) return json({ ok: false, error: `|qty| must be <= ${cfg.max_mwh_per_isp}` });
       const now = new Date().toISOString();
       db.prepare(`INSERT OR REPLACE INTO user_bets (date_ro, isp, qty, updated_at, source, user) VALUES (?,?,?,?,'manual',?)`).run(date, isp, qty, now, req.user);
@@ -1711,6 +1893,22 @@ const server = http.createServer(async (req, res) => {
       if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks
       return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
     }
+    if (url.pathname === '/api/pulse') {
+      // LIVE system-state nowcast from the freshest SCADA (sen_live table → no extra source load): dev = sold − plan
+      // (physical exchange vs plan) reads the settled imbalance at ~0.54 / 80% sign — import OVER plan → DEFICIT lean.
+      // ~1-min fresh. Plus the latest settled imbalance as the anchor + a TURN flag when the live read disagrees with it.
+      // Situational awareness + early-flip detection, NOT a 75-min forecast edge (validated: persistence still wins the anchor).
+      const recent = db.prepare('SELECT ts_ms, pulled_at, sold, plan FROM sen_live WHERE sold IS NOT NULL AND plan IS NOT NULL ORDER BY ts_ms DESC LIMIT 30').all();
+      if (!recent.length) return json({ ok: false });
+      const cur = recent[0], dev = cur.sold - cur.plan;       // ts_ms carries a +3h local-as-UTC offset (relative diffs ok); age uses pulled_at (true UTC)
+      const older = recent.find((r) => r.ts_ms <= cur.ts_ms - 10 * 60000);
+      const trend = older ? dev - (older.sold - older.plan) : null;       // rising dev = deficit deepening
+      const im = db.prepare("SELECT ts_utc, value FROM series WHERE series='damas_est_sys_imbalance' AND value IS NOT NULL ORDER BY ts_utc DESC LIMIT 1").get();
+      const anchor = im ? im.value : null;
+      const scadaSign = Math.abs(dev) < 25 ? '' : (dev > 0 ? 'D' : 'S');   // dev>0 = importing over plan = deficit lean
+      const anchorSign = anchor == null || Math.abs(anchor) < 10 ? '' : (anchor > 0 ? 'S' : 'D');
+      return json({ ok: true, ageS: Math.max(0, Math.round((Date.now() - Date.parse(cur.pulled_at)) / 1000)), dev: Math.round(dev), trend: trend == null ? null : Math.round(trend), scadaSign, anchor: anchor == null ? null : Math.round(anchor), anchorSign, anchorAgeMin: im ? Math.round((Date.now() - Date.parse(im.ts_utc)) / 60000) : null, turn: !!(scadaSign && anchorSign && scadaSign !== anchorSign) });
+    }
     if (url.pathname === '/api/xbpi') {
       // Full intraday history of the notified cross-border for one interval (the PI trades): every recorded frame
       // with its step Δ (sold = net export rose, bought = fell). Powers the ⓘ popup on the Notif cross border cell.
@@ -1725,6 +1923,56 @@ const server = http.createServer(async (req, res) => {
       if (frames.length) { try { const r = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND ts_utc=?").get(frames[0].ts_utc); realized = r ? r.value : null; } catch { /* ignore */ } }
       let mm = (isp - 1) * 15 - 60; if (mm < 0) mm += 1440;
       return json({ isp, cet: `${pad(Math.floor(mm / 60))}:${pad(mm % 60)}`, frames: out, realized });
+    }
+    if (url.pathname === '/api/sign_score') {
+      // today's locked-forecast scorecard: each settled interval's locked prediction vs the realized sign, the
+      // running hit-rate, and the trailing MISS STREAK (the model "checking itself" — surfaces when it's off-trend
+      // today so the forward calls can be discounted). Read-only; the forward probabilities already update each close.
+      const qd = url.searchParams.get('date') || today;
+      const locks = db.prepare('SELECT isp, sign, conf FROM sign_lock WHERE date_ro=? ORDER BY isp').all(qd);
+      const imbStmt = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND date_ro=? AND isp=?");
+      const rows = []; let hit = 0;
+      for (const l of locks) { const im = imbStmt.get(qd, l.isp); if (!im || im.value == null) continue; const act = im.value > 0 ? 'S' : 'D'; const ok = act === l.sign; if (ok) hit++; rows.push({ isp: l.isp, pred: l.sign, conf: l.conf, act, ok }); }
+      let streak = 0; for (let k = rows.length - 1; k >= 0; k--) { if (!rows[k].ok) streak++; else break; }
+      return json({ n: rows.length, hit, pct: rows.length ? Math.round(hit / rows.length * 100) : null, streak, last: rows.slice(-6) });
+    }
+    if (url.pathname === '/api/predict_sign') {
+      // live forecast of the surplus/deficit SIGN + confidence for each UPCOMING interval. Fuses persistence
+      // (last settled imbalance) + time-of-day + the PI order-flow on that interval. Refreshes as new PI trades land.
+      const qd = url.searchParams.get('date') || today;
+      const model = getSignModel();
+      const out = [];
+      if (model) {
+        const nowMs = Date.now();
+        const ni = roDateIsp(new Date()); const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp);
+        const gateMs = (curTs ? new Date(curTs.ts).getTime() : nowMs) + 75 * signModel.MIN; // first TRADEABLE start (current-ISP start + 75min)
+        const reg = liveRegime(nowMs - signModel.PUB_LAG * signModel.MIN);
+        const persist = reg ? reg.persist : null;
+        if (persist !== null) {
+          const piStmt = db.prepare('SELECT pulled_at, commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? ORDER BY pulled_at');
+          for (const { isp, ts } of dayTimestamps(qd)) {
+            if (isp < signModel.WIN_FROM || isp > signModel.WIN_TO) continue;
+            const Tms = new Date(ts).getTime(); const lead = (Tms - nowMs) / signModel.MIN;
+            if (Tms < gateMs) continue;                     // TRADEABLE only (start ≥ gate = current ISP+5, incl. the current tradeable/gate row which stays LIVE); untradeable show their LOCKED forecast
+            let frames = []; try { frames = piStmt.all(qd, isp).map((f) => ({ p: Date.parse(f.pulled_at), c: f.commercial })); } catch { /* ignore */ }
+            const pi_move = frames.length >= 2 ? frames[frames.length - 1].c - frames[0].c : 0; // cumulative → model
+            const burst = recentMove(frames, nowMs); const pa = Math.abs(burst); // recent burst → panic flag
+            const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(qd, isp), isp, lead);
+            out.push({ isp, p: +p.toFixed(3), conf: Math.round(Math.max(p, 1 - p) * 100), sign: p >= 0.5 ? 'S' : 'D', panic: pa >= PANIC_MW ? { abs: Math.round(pa), dir: burst > 0 ? 'S' : 'D', opposes: (burst > 0 ? 'S' : 'D') !== (persist > 0 ? 'S' : 'D') } : null });
+          }
+        }
+      }
+      return json({ n: out.length, rows: out });
+    }
+    if (url.pathname === '/api/panics') {
+      // logged big-PI-repositioning events for a day + the accumulating validation: when realized sign FLIPPED vs
+      // persistence, how often did the PI move point the right way? (the desk's "panic flips the state" test)
+      const qd = url.searchParams.get('date') || today;
+      const rows = db.prepare('SELECT isp, pi_move, pi_abs, base_p, pi_dir, persist_dir, opposes, realized_dir FROM panic_log WHERE date_ro=? ORDER BY isp').all(qd);
+      const scored = db.prepare('SELECT pi_dir, persist_dir, realized_dir FROM panic_log WHERE realized_dir IS NOT NULL').all();
+      let flips = 0, piRightOnFlip = 0, confirms = 0, piOverall = 0;
+      for (const s of scored) { if (s.pi_dir === s.realized_dir) piOverall++; if (s.realized_dir !== s.persist_dir) { flips++; if (s.pi_dir === s.realized_dir) piRightOnFlip++; } else confirms++; }
+      return json({ date: qd, threshold_mw: PANIC_MW, rows, summary: { scored: scored.length, flips, pi_right_on_flip: piRightOnFlip, confirms, pi_overall_right: piOverall } });
     }
     if (url.pathname === '/api/histrows') {
       // the 2 historical rows (same interval, prev day + 2 days ago) for the per-row expand caret on the Predict page
