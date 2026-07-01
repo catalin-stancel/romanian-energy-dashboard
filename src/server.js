@@ -162,7 +162,8 @@ function histRowHtml(d, isp, label, last, gate) {
   const ar = (v) => (v === null || v === undefined ? '' : `${v >= 0 ? '↑' : '↓'}${Math.round(Math.abs(v))}`);
   const dl = (v) => (v === null || v === undefined ? '' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${Math.round(v)}</span>`);
   const need = ['damas_est_sys_imbalance', 'damas_est_price_pos', 'damas_notif_prod', 'damas_notif_cons', 'damas_cons_real',
-    'damas_sx_rohu', 'damas_sx_robg', 'damas_sx_rors', 'damas_sx_roua', 'damas_sx_romd', 'damas_sx_huro', 'damas_sx_bgro', 'damas_sx_rsro', 'damas_sx_uaro', 'damas_sx_mdro'];
+    'damas_sx_rohu', 'damas_sx_robg', 'damas_sx_rors', 'damas_sx_roua', 'damas_sx_romd', 'damas_sx_huro', 'damas_sx_bgro', 'damas_sx_rsro', 'damas_sx_uaro', 'damas_sx_mdro',
+    'gen_actual_solar', 'gen_actual_wind_onshore', 'gen_actual_hydro_reservoir', 'gen_actual_hydro_ror', 'gen_actual_nuclear', 'gen_actual_gas', 'gen_actual_hard_coal', 'gen_actual_lignite', 'gen_actual_biomass', 'gen_actual_B25'];
   const m = {};
   try { for (const r of db.prepare(`SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series IN (${need.map(() => '?').join(',')})`).all(d, isp, ...need)) m[r.series] = r.value; } catch { /* ignore */ }
   let rxb = null; try { const r = db.prepare('SELECT avg_realxb FROM sen_interval WHERE date_ro=? AND isp=?').get(d, isp); if (r) rxb = r.avg_realxb; } catch { /* ignore */ }
@@ -173,12 +174,17 @@ function histRowHtml(d, isp, label, last, gate) {
   for (const s of ['damas_sx_huro', 'damas_sx_bgro', 'damas_sx_rsro', 'damas_sx_uaro', 'damas_sx_mdro']) if (m[s] != null) { nxb = (nxb || 0) - m[s]; any = true; }
   if (!any) nxb = null;
   const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
+  // real production for that interval = sum of settled ENTSO-E generation by type; + the per-source split (.prodmix, follows the toggle)
+  const ga = (k) => (m['gen_actual_' + k] ?? null);
+  let rprod = null; for (const k of ['solar', 'wind_onshore', 'hydro_reservoir', 'hydro_ror', 'nuclear', 'gas', 'hard_coal', 'lignite', 'biomass', 'B25']) { const v = ga(k); if (v != null) rprod = (rprod || 0) + v; }
+  const rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear');
+  const rprodCell = rprod === null ? '' : f(rprod) + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="other (coal/gas/biomass)">🔥${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0)))}</span></span>`;
   // weather as it was at that interval's hour
   let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
   return `<tr class="histrow ${gate ? 'hg' : 'hx'}${last ? ' histrow-last' : ''}" data-pisp="${isp}"><td title="same interval, ${d}"><span class="histlbl">${label}</span></td><td><small>${cetLabel(isp)}</small></td>`
     + `<td>${imb !== null ? dirIcon(imb > 0) + ' ' + f(Math.abs(imb)) : ''}</td>`
     + `<td>${price !== null ? f(price) + ' <small class="cur">lei</small>' : ''}</td>`
-    + `<td></td><td>${f(np)}</td><td>${wxTxt}</td><td></td>`
+    + `<td>${rprodCell}</td><td>${f(np)}</td><td>${wxTxt}</td><td></td>`
     + `<td>${f(rc)}</td><td>${f(nc)}</td><td></td>`
     + `<td>${rxb !== null ? ar(rxb) : ''}</td><td>${nxb !== null ? ar(nxb) : ''}</td><td></td><td></td><td></td>`
     + `<td>${xbd !== null ? dl(xbd) : ''}</td>`
@@ -293,6 +299,9 @@ function pzuData(date) {
   // xb_combo D-1 colour signal (SHADOW — live-scored, does NOT drive the position; staged rollout 2026-06-19)
   let combo = new Map();
   try { combo = new Map(db.prepare("SELECT isp, pred_surplus, p_surplus, model_correct, realized_imb FROM combo_pred WHERE kind='d1' AND date_ro=?").all(date).map((r) => [r.isp, r])); } catch { /* combo_pred not present yet */ }
+  // external "RO Signal Override" desk positions (BUY/SELL/HOLD + Q per interval) — these REPLACE our model advice as the position
+  let ext = new Map();
+  try { ext = new Map(db.prepare('SELECT isp, sig, q FROM ext_signals WHERE date_ro=?').all(date).map((r) => [r.isp, r])); } catch { /* ext_signals not present yet */ }
 
   const cfgRon = cfg.eur_ron;
   const rows = dayTimestamps(date).map(({ isp, ts }) => {
@@ -308,9 +317,12 @@ function pzuData(date) {
     const betSource = ub?.source ?? null;
     const result = qty !== null && qty !== 0 && imbPrice !== null && pzuRon !== null
       ? qty * (imbPrice - pzuRon) : null;
+    const es = ext.get(isp);
     return {
       isp, eet: ispLabel(isp), cet: cetLabel(isp),
-      inWindow: isp >= ispFrom && isp <= ispTo,
+      // desk covers all 24h → any interval with a desk signal is tradeable (night = BUY/HOLD only, enforced upstream)
+      inWindow: es ? true : (isp >= ispFrom && isp <= ispTo),
+      deskSig: es ? es.sig : null, deskQ: es != null ? es.q : null,
       probLong: p?.prob_long ?? null, imbP50: p?.imb_p50 ?? null, priceP50: p?.price_p50 ?? null,
       priceP10: p?.price_p10 ?? null, priceP90: p?.price_p90 ?? null,
       adviceQty: a ? (a.dir === 'surplus' ? a.qty : -a.qty) : null,
@@ -675,12 +687,10 @@ function pzuPage(date) {
     <td>${fmt(r.imbP50)} MWh</td>
     <td>${fmt(r.priceP50)}<br><small>${fmt(r.priceP10)} … ${fmt(r.priceP90)}</small></td>
     <td>${r.pzuRon !== null ? fmt(r.pzuRon) + (r.pzuConverted ? '<small>≈</small>' : '') : '<small>pending</small>'}</td>
-    <td>${r.adviceQty === null ? '<span class="mid">—</span>'
-      : r.adviceQty === 0
-        ? (r.adviceReason === 'costly if wrong'
-          ? `<span class="hold" title="EV ${fmt(r.adviceEdge)} RON/MWh, but a wrong call risks ~${fmt(r.adviceTail)} RON/MWh">HOLD — costly if wrong</span>`
-          : '<span class="mid">— low EV</span>')
-        : `<span class="badge ${r.adviceQty > 0 ? 'srp' : 'dfc'}">${r.adviceQty > 0 ? 'BUY' : 'SELL'}</span> ${Math.abs(r.adviceQty).toFixed(1)} MWh <small>EV ${fmt(r.adviceEdge)} RON/MWh</small>`}</td>
+    <td>${r.deskSig === null ? '<span class="mid">—</span>'
+      : (r.deskSig === 'HOLD' || !r.deskQ)
+        ? '<span class="hold">HOLD</span>'
+        : `<span class="badge ${r.deskSig === 'BUY' ? 'srp' : 'dfc'}">${r.deskSig}</span> ${(+r.deskQ).toFixed(1)} MWh`}</td>
     <td>${r.comboSurplus === null ? '<span class="mid">—</span>'
       : `${dirIcon(r.comboSurplus)} <small>${(Math.max(r.comboP, 1 - r.comboP) * 100).toFixed(0)}%</small>${r.comboSettled ? (r.comboCorrect ? ' <span class="pos">✓</span>' : ' <span class="neg">✗</span>') : ''}`}</td>
     <td>${r.inWindow
@@ -735,7 +745,7 @@ ${NAV('pzu', date, null, extras)}<div class="content">
       ? `⚠ Manually UNLOCKED — changes are being recorded after the deadline. <button onclick="lockAgain()">Lock again</button>`
       : `Editable until 10:00 CET on ${euDate(addDays(date, -1))} (then locked).`}
   <span id="status"></span></div>
-<table><tr><th>Interval</th><th>CET</th><th>Prediction</th><th title="predicted imbalance, MWh">Imbalance</th><th title="predicted imbalance price, RON/MWh">Price</th><th title="PZU price, RON/MWh">PZU</th><th title="MWh, PZU-side action">Advice</th><th title="xb_combo day-ahead-commitment colour signal — SHADOW, live-scored, NOT driving the position yet">Combo<br><small>shadow</small></th><th title="MWh, PZU-side action">Your position</th><th title="realized imbalance price, RON/MWh">Realized</th><th title="RON">Model result</th><th title="RON">Result</th></tr>
+<table><tr><th>Interval</th><th>CET</th><th>Prediction</th><th title="predicted imbalance, MWh">Imbalance</th><th title="predicted imbalance price, RON/MWh">Price</th><th title="PZU price, RON/MWh">PZU</th><th title="external RO Signal Override desk — BUY/SELL/HOLD + Q (MW). Night intervals are BUY/HOLD only. Replaces our old model advice as the position.">Desk (PZU)</th><th title="xb_combo day-ahead-commitment colour signal — SHADOW, live-scored, NOT driving the position yet">Combo<br><small>shadow</small></th><th title="MWh, PZU-side action">Your position</th><th title="realized imbalance price, RON/MWh">Realized</th><th title="RON">Model result</th><th title="RON">Result</th></tr>
 ${rows}
 ${anyResult || anyModel ? `<tr><td colspan="10" style="text-align:right"><b>Day total</b></td>
 <td>${anyModel ? `<b class="${totalModel >= 0 ? 'pos' : 'neg'}">${Math.round(totalModel).toLocaleString('en-US')} RON</b>` : ''}</td>
@@ -872,8 +882,13 @@ function piPage(date) {
     if (new Date(ts).getTime() + 900000 <= nowMs && sv('damas_est_sys_imbalance', ts) !== null) lastRealIsp = isp;
   }
   let cum = 0, settled = 0, committed = 0, hits = 0, judged = 0, lockHits = 0, lockJudged = 0;
+  // external desk day-ahead PZU plan (BUY/SELL/HOLD + Q) — shown as a reference column
+  let extPi = new Map();
+  try { extPi = new Map(db.prepare('SELECT isp, sig, q FROM ext_signals WHERE date_ro=?').all(date).map((r) => [r.isp, r])); } catch { /* ext_signals not present yet */ }
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
+    const _es = extPi.get(isp);
+    const deskC = _es ? (_es.sig === 'HOLD' || !_es.q ? '<span class="hold">HOLD</span>' : `<span class="badge ${_es.sig === 'BUY' ? 'srp' : 'dfc'}">${_es.sig}</span> ${(+_es.q).toFixed(1)}`) : '';
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
     const isPast = tsMs + 900000 <= nowMs;
     const p1 = d1.get(isp);
@@ -974,6 +989,7 @@ function piPage(date) {
       <td class="${sysFc ? 'fc' : ''}"${prodTitle ? ` title="${prodTitle}"` : ''}>${prodC}</td>
       <td class="${sysFc ? 'fc' : ''}">${consC}</td>
       <td class="${sysFc ? 'fc' : ''}">${xbC}</td>
+      <td>${deskC}</td>
       <td>${pzuCommitC}</td>
       <td>${qty ? `<span class="badge ${qty > 0 ? 'srp' : 'dfc'}">${qty > 0 ? 'SELL' : 'BUY'}</span> ${Math.abs(qty).toFixed(1)}${ub.source === 'auto' ? ' <small>auto</small>' : ''}` : ''}</td>
       <td>${pnl === null ? '' : `<span class="${pnl >= 0 ? 'pos' : 'neg'}">${fmt(pnl)}</span>`}</td>
@@ -1000,7 +1016,7 @@ function piPage(date) {
     ${colPicker('cols-pi', [0, 5, 6, 7, 8])}`; // phone default: CET, Type, Qty, Price, position, P&L
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>PI ${date}</title>${STYLE}</head><body>
 ${NAV('pi', date, { left: updLeft, period: 300 }, extras)}<div class="content">
-<table><tr><th>Interval</th><th>CET</th><th>Type</th><th title="system imbalance, MWh">Qty</th><th title="imbalance price, RON/MWh">Price</th><th title="country generation [MW]; hover a value for the per-source split">Prod</th><th title="consumption [MW]">Cons</th><th title="net cross-border [MW]: ↑ export, ↓ import">X-B</th><th title="DA-coupling net position committed yesterday on PZU [MW]: ↑ export, ↓ import">PZU D−1</th><th title="your position [MWh], balancing-side action">My position</th><th title="RON">P&amp;L</th></tr>
+<table><tr><th>Interval</th><th>CET</th><th>Type</th><th title="system imbalance, MWh">Qty</th><th title="imbalance price, RON/MWh">Price</th><th title="country generation [MW]; hover a value for the per-source split">Prod</th><th title="consumption [MW]">Cons</th><th title="net cross-border [MW]: ↑ export, ↓ import">X-B</th><th title="external RO Signal Override desk — day-ahead PZU plan (BUY/SELL/HOLD + Q MW). Night = buy-only.">PZU plan</th><th title="DA-coupling net position committed yesterday on PZU [MW]: ↑ export, ↓ import">PZU D−1</th><th title="your position [MWh], balancing-side action">My position</th><th title="RON">P&amp;L</th></tr>
 ${body}</table></div>
 <script>window.addEventListener('DOMContentLoaded',function(){
   var n=document.querySelector('tr.now')||document.querySelector('tr.lastpos,tr.lastneg');

@@ -206,8 +206,10 @@ function main() {
   console.log(`${runAt}: ${n} predictions stored`);
   const nBets = computeBets(db, model, now, runAt);
   console.log(`${nBets} bet rows stored`);
-  const nAuto = autoFillUserBets(db, runAt, now);
-  console.log(`${nAuto} user bets auto-filled from advice`);
+  // Model auto-fill DISABLED 2026-07-01: positions now come from the external desk (pull_signals.js autoFillFromDesk),
+  // which replaced our failed PZU prediction. Keeping the function for reference / possible fallback.
+  // const nAuto = autoFillUserBets(db, runAt, now);
+  // console.log(`${nAuto} user bets auto-filled from advice`);
   renderDashboard(db, model, now);
 }
 

@@ -17,6 +17,8 @@ const JOBS = [
   { name: 'pi_learn', script: 'pi_learn.js', args: [], everyMin: 15 },
   // precompute sign+res models into model_cache (off the request path) + truncate WAL — every 30 min
   { name: 'train_models', script: 'train_models.js', args: [], everyMin: 30 },
+  // external "RO Signal Override" desk → ext_signals + auto-fill positions (no-op unless SIGNAL_URL env is set)
+  { name: 'signals', script: 'pull_signals.js', args: [], everyMin: 15 },
   // daily / weekly (UTC clock)
   { name: 'oferte', script: 'update_oferte.js', args: [], dailyUtc: '03:30', nodeArgs: ['--max-old-space-size=1536'] },
   { name: 'train', script: 'train.js', args: [], weeklyUtc: { dow: 0, hour: 4 }, nodeArgs: ['--max-old-space-size=2048'] },
