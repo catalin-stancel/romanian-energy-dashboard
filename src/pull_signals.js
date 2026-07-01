@@ -57,11 +57,11 @@ function autoFillFromDesk(db, now) {
     ON CONFLICT (date_ro, isp) DO UPDATE SET qty=excluded.qty, updated_at=excluded.updated_at
     WHERE user_bets.source = 'auto' AND user_bets.qty != excluded.qty`);
   const log = db.prepare('INSERT INTO user_bets_log (date_ro, isp, qty, saved_at) VALUES (?,?,?,?)');
-  let unlocked = new Set(); try { unlocked = new Set(db.prepare('SELECT date_ro FROM page_unlocks WHERE unlocked=1').all().map((r) => r.date_ro)); } catch { /* table may not exist yet */ }
+  const today = roDateIsp(now).date; // sync the desk's active/future delivery date(s); never rewrite settled past days
   const ts = now.toISOString(); let n = 0;
   db.exec('BEGIN');
   for (const s of sigs) {
-    if (now.getTime() >= lockTimeFor(s.date_ro).getTime() && !unlocked.has(s.date_ro)) continue; // frozen after 10:00 CET D-1
+    if (s.date_ro < today) continue; // no fixed 10:00 freeze → the FINAL desk plan is always captured each day; a date naturally freezes once the desk rolls to the next delivery date (its ext_signals stop updating)
     const signed = s.sig === 'BUY' ? s.q : s.sig === 'SELL' ? -s.q : 0; // PZU-side: BUY=+ (surplus), SELL=−
     const before = db.prepare('SELECT qty, source FROM user_bets WHERE date_ro=? AND isp=?').get(s.date_ro, s.isp);
     upsert.run(s.date_ro, s.isp, signed, ts);
@@ -87,7 +87,7 @@ async function main() {
   console.log(`stored ${n} rows into ext_signals`);
   // desk signal IS the position: auto-fill user_bets (replaces the old model auto-fill), then lock@10:00 + PI P&L track it
   const nf = autoFillFromDesk(db, new Date());
-  console.log(`auto-filled ${nf} user_bets positions from the desk (unlocked dates only)`);
+  console.log(`auto-filled ${nf} user_bets positions from the desk (current + future delivery dates; past days untouched, manual preserved)`);
   const bySig = {}; for (const r of rows) bySig[r.sig] = (bySig[r.sig] || 0) + 1;
   console.log('signal counts:', JSON.stringify(bySig));
   console.log('date span:', rows[0].date, 'isp', rows[0].isp, '→', rows[rows.length - 1].date, 'isp', rows[rows.length - 1].isp);
