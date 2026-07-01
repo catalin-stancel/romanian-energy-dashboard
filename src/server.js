@@ -1660,11 +1660,12 @@ ${body}</table></div>
       if(last!==null&&last!==j.soldIsp){var o=document.querySelector('td[data-rxb="'+last+'"] .rxblive');if(o)o.remove();var or=document.querySelector('td[data-rxb="'+last+'"]');if(or&&or.parentElement)or.parentElement.classList.remove('liverow');} // freeze prior interval (keep its value + colour), drop its big-row treatment
       var c=document.querySelector('td[data-rxb="'+j.soldIsp+'"]');
       if(c&&c.parentElement)c.parentElement.classList.add('liverow'); // big-row treatment follows the live interval between refreshes
-      // colour & Δ against the DISPLAYED Notif cross border (DAMAS nxb, in the adjacent cell's data-v) so they agree with the row — NOT the sen-filter PLAN (the two feeds differ)
+      // Notif X-B SINGLE SOURCE OF TRUTH = the DISPLAYED value (DAMAS netted rollup, refreshed by the 15s full reload,
+      // which is actually the FRESHER feed — 15s vs xb_pi_snap's ~60s). Do NOT overwrite it here from notifPi: the two
+      // feeds differ per-poll, so rewriting made the current interval's Notif X-B flicker between them and spuriously
+      // flash every cycle. Colour/Δ use the displayed value; notifPi/notifxb are only a fallback if the cell is blank.
       var nc=document.querySelector('td.nxbcell[data-isp="'+j.soldIsp+'"]');
-      // LIVE notif = freshest PI commercial (per poll) so notif + Δ track real time; fall back to the rendered cell, then sen-filter plan
-      var notif=(j.notifPi!=null)?j.notifPi:((nc&&nc.dataset.v!=='')?+nc.dataset.v:j.notifxb);
-      if(nc&&j.notifPi!=null){nc.dataset.v=Math.round(j.notifPi);var nv=nc.querySelector('.nxbval');if(nv)nv.textContent=ar(j.notifPi);}
+      var notif=(nc&&nc.dataset.v!=='')?+nc.dataset.v:(j.notifPi!=null?j.notifPi:j.notifxb);
       if(c){
         c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+(notif!=null?Math.round(notif):'?')+' MW · '+new Date().toLocaleTimeString();
         c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'');
