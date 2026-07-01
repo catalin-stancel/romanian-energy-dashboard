@@ -4,10 +4,15 @@
 // Weather inputs = ensemble mean (4 RO points × models), latest run per hour — same read for fit (past) and forecast (future).
 // In-sample MAE (2026-06, ~19-day overlap): solar 246 vs ENTSO-E 250; wind 136 vs 128 — competitive. Refit hourly.
 function hourlyWeather(db, varName) {
+  const m = new Map();
+  // fast path: pre-materialized latest-run ensemble mean (pull_weather.js maintains weather_hourly)
+  try { for (const r of db.prepare('SELECT ts_utc, value FROM weather_hourly WHERE var=? AND value IS NOT NULL').all(varName)) m.set(r.ts_utc.slice(0, 13), r.value); } catch { /* table may not exist yet */ }
+  if (m.size) return m;
+  // fallback: derive latest-run mean from raw weather (only if weather_hourly is empty/absent)
   const rows = db.prepare('SELECT ts_utc, pulled_at, value FROM weather WHERE var=? AND value IS NOT NULL').all(varName);
   const latest = new Map(); for (const r of rows) { const e = latest.get(r.ts_utc); if (!e || r.pulled_at > e) latest.set(r.ts_utc, r.pulled_at); }
   const agg = new Map(); for (const r of rows) { if (r.pulled_at !== latest.get(r.ts_utc)) continue; const h = r.ts_utc.slice(0, 13); const e = agg.get(h) || { s: 0, n: 0 }; e.s += r.value; e.n++; agg.set(h, e); }
-  const m = new Map(); for (const [h, e] of agg) m.set(h, e.s / e.n); return m;
+  for (const [h, e] of agg) m.set(h, e.s / e.n); return m;
 }
 function hourlyGen(db, series) {
   const rows = db.prepare('SELECT ts_utc, value FROM series WHERE series=? AND value IS NOT NULL').all(series);

@@ -54,6 +54,10 @@ async function main() {
   db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
     .run('open-meteo', Object.keys(POINTS).join(','), pulledAt, new Date().toISOString(), total, null);
   console.log(`stored ${total} weather points (pulled_at=${pulledAt})`);
+  // refresh the fast per-hour ensemble-mean table (weather_hourly) for this run — the app reads THIS, not the 2.4M-row raw table
+  db.exec('CREATE TABLE IF NOT EXISTS weather_hourly(ts_utc TEXT, var TEXT, value REAL, pulled_at TEXT, PRIMARY KEY(ts_utc,var))');
+  const nh = db.prepare('INSERT OR REPLACE INTO weather_hourly(ts_utc,var,value,pulled_at) SELECT ts_utc, var, AVG(value), pulled_at FROM weather WHERE pulled_at=? GROUP BY ts_utc, var').run(pulledAt);
+  console.log(`weather_hourly refreshed: ${nh.changes} (ts,var) rows from this run`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

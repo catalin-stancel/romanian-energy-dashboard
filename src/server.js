@@ -49,7 +49,15 @@ db.exec(`
     model_version TEXT, realized_price REAL, realized_revenue REAL, tail_loss REAL, reason TEXT,
     PRIMARY KEY (run_at, ts_utc)
   );
+  -- per-day covering indexes: the "latest run per ts_utc" subqueries (piLocked/betPred/anyPred/expTotal/acc)
+  -- were full-scanning 200k+ rows; scoping them to date_ro makes each a ~few-hundred-row covering seek
+  CREATE INDEX IF NOT EXISTS idx_pred_day ON predictions(date_ro, ts_utc, run_at, actionable);
+  CREATE INDEX IF NOT EXISTS idx_bets_day ON bets(date_ro, ts_utc, run_at, actionable);
 `);
+// materialized fast tables the app reads from (populated by the pull_weather + train_models jobs, which run within
+// ~30s of boot then on schedule; readers fall back gracefully until first populated).
+db.exec('CREATE TABLE IF NOT EXISTS weather_hourly(ts_utc TEXT, var TEXT, value REAL, pulled_at TEXT, PRIMARY KEY(ts_utc,var))');
+db.exec('CREATE TABLE IF NOT EXISTS model_cache(name TEXT PRIMARY KEY, json TEXT, trained_at TEXT)');
 
 function loadConfig() {
   const defaults = { eur_ron: 5.24, trade_window_cet: [7, 22], max_mwh_per_isp: 2.5, min_mwh_per_isp: 2.0, risk_aversion: 0.5 };
@@ -117,21 +125,12 @@ function xbPiChange(date) {
 function weatherForDate(date) {
   const out = new Map();
   try {
-    const lo = date + 'T00:00:00Z', hi = addDays(date, 1) + 'T06:00:00Z'; // RO day spans ~prevday22:00..day22:00 UTC; widen a bit
-    const realPull = (db.prepare('SELECT MAX(pulled_at) m FROM weather').get() || {}).m;
-    const fcPull = (db.prepare('SELECT MAX(pulled_at) m FROM weather WHERE pulled_at < ?').get(date + 'T00:00Z') || {}).m;
-    const agg = (pull, vr) => {
-      const o = new Map();
-      if (!pull) return o;
-      const acc = new Map();
-      for (const r of db.prepare('SELECT ts_utc, value FROM weather WHERE pulled_at=? AND var=? AND ts_utc>=? AND ts_utc<=?').all(pull, vr, lo.slice(0, 13) + ':00:00Z', hi)) {
-        const k = r.ts_utc.slice(0, 13); const e = acc.get(k) || { s: 0, n: 0 }; e.s += r.value; e.n++; acc.set(k, e);
-      }
-      for (const [k, e] of acc) o.set(k, e.s / e.n);
-      return o;
-    };
-    const cloudR = agg(realPull, 'cloud_cover'), windR = agg(realPull, 'wind_speed_100m'), windF = agg(fcPull, 'wind_speed_100m');
-    for (const k of new Set([...cloudR.keys(), ...windR.keys()])) out.set(k, { cloud: cloudR.has(k) ? cloudR.get(k) : null, windReal: windR.has(k) ? windR.get(k) : null, windFc: windF.has(k) ? windF.get(k) : null });
+    // fast: latest-run ensemble mean from the materialized weather_hourly (was 3 full scans of the 2.4M-row raw table)
+    const lo = date + 'T00:00:00Z', hi = addDays(date, 1) + 'T06:00:00Z';
+    for (const r of db.prepare("SELECT ts_utc, var, value FROM weather_hourly WHERE var IN ('cloud_cover','wind_speed_100m') AND ts_utc>=? AND ts_utc<=?").all(lo, hi)) {
+      const k = r.ts_utc.slice(0, 13); const e = out.get(k) || { cloud: null, windReal: null, windFc: null };
+      if (r.var === 'cloud_cover') e.cloud = r.value; else e.windReal = r.value; out.set(k, e);
+    }
   } catch { /* table not created yet */ }
   return out;
 }
@@ -140,7 +139,7 @@ const skyIcon = (cloud) => (cloud == null ? '' : cloud < 20 ? '☀️' : cloud <
 // + spatial mean). For historical rows. Needs ix_weather_ts (added at startup) to be fast.
 function wxAtHour(hourISO) {
   try {
-    const rows = db.prepare("SELECT var, AVG(value) v FROM weather WHERE ts_utc=? AND pulled_at=(SELECT MAX(pulled_at) FROM weather WHERE ts_utc=?) AND var IN ('cloud_cover','wind_speed_100m') GROUP BY var").all(hourISO, hourISO);
+    const rows = db.prepare("SELECT var, value v FROM weather_hourly WHERE ts_utc=? AND var IN ('cloud_cover','wind_speed_100m')").all(hourISO);
     if (!rows.length) return null;
     let cloud = null, wind = null;
     for (const r of rows) { if (r.var === 'cloud_cover') cloud = r.v; else if (r.var === 'wind_speed_100m') wind = r.v; }
@@ -704,9 +703,9 @@ function pzuPage(date) {
   // expected total at decision time, and prediction accuracy for the day
   const expTotal = db.prepare(`
     SELECT SUM(b.exp_revenue) s FROM bets b
-    JOIN (SELECT ts_utc, MAX(run_at) mr FROM bets WHERE actionable=1 GROUP BY ts_utc) x
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM bets WHERE actionable=1 AND date_ro=? GROUP BY ts_utc) x
       ON x.ts_utc=b.ts_utc AND x.mr=b.run_at
-    WHERE b.date_ro=? AND b.qty > 0`).get(date).s;
+    WHERE b.date_ro=? AND b.qty > 0`).get(date, date).s;
   let accHits = 0, accN = 0, winHits = 0, winN = 0;
   for (const r of d.rows) {
     if (r.probLong !== null && r.imb !== null && r.imb !== undefined) {
@@ -791,9 +790,9 @@ function piPage(date) {
   // PI-locked view: last prediction issued >= 75 min before each ISP (the binding one)
   const piLocked = new Map(db.prepare(`
     SELECT p.isp, p.prob_long, p.price_p50, p.imb_p50 FROM predictions p
-    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE actionable=1 GROUP BY ts_utc) x
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE actionable=1 AND date_ro=? GROUP BY ts_utc) x
       ON x.ts_utc=p.ts_utc AND x.mr=p.run_at
-    WHERE p.date_ro=?`).all(date).map((r) => [r.isp, r]));
+    WHERE p.date_ro=?`).all(date, date).map((r) => [r.isp, r]));
   const userBets = new Map(db.prepare('SELECT isp, qty, source FROM user_bets WHERE date_ro=?').all(date).map((r) => [r.isp, r]));
 
   // country system data for the day: generation per source, flows per border (realized),
@@ -839,16 +838,16 @@ function piPage(date) {
   // predictions table has no rows)
   const betPred = new Map(db.prepare(`
     SELECT b.isp, b.exp_price FROM bets b
-    JOIN (SELECT ts_utc, MAX(run_at) mr FROM bets WHERE actionable=1 AND run_at<=? GROUP BY ts_utc) x
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM bets WHERE actionable=1 AND date_ro=? AND run_at<=? GROUP BY ts_utc) x
       ON x.ts_utc=b.ts_utc AND x.mr=b.run_at
-    WHERE b.date_ro=?`).all(lockAt, date).map((r) => [r.isp, r.exp_price]));
+    WHERE b.date_ro=?`).all(date, lockAt, date).map((r) => [r.isp, r.exp_price]));
   // last-resort: latest estimate issued before the interval started, even inside the freeze
   // window (non-binding — shown with an asterisk)
   const anyPred = new Map(db.prepare(`
     SELECT p.isp, p.prob_long, p.imb_p50, p.price_p50 FROM predictions p
-    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE run_at < ts_utc GROUP BY ts_utc) x
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE run_at < ts_utc AND date_ro=? GROUP BY ts_utc) x
       ON x.ts_utc=p.ts_utc AND x.mr=p.run_at
-    WHERE p.date_ro=?`).all(date).map((r) => [r.isp, r]));
+    WHERE p.date_ro=?`).all(date, date).map((r) => [r.isp, r]));
 
   const fmt = (v) => (v === null || v === undefined ? '—' : Math.round(v));
   // balancing price digits grow + embolden with magnitude: ~12px/400 at small, 18px/700 at extreme
@@ -991,9 +990,9 @@ function piPage(date) {
   // model's expected total for the day (locked positions' expected revenue)
   const expTotal = db.prepare(`
     SELECT SUM(b.exp_revenue) s FROM bets b
-    JOIN (SELECT ts_utc, MAX(run_at) mr FROM bets WHERE actionable=1 GROUP BY ts_utc) x
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM bets WHERE actionable=1 AND date_ro=? GROUP BY ts_utc) x
       ON x.ts_utc=b.ts_utc AND x.mr=b.run_at
-    WHERE b.date_ro=? AND b.qty > 0`).get(date).s;
+    WHERE b.date_ro=? AND b.qty > 0`).get(date, date).s;
   const extras = `
     <span class="totalpill r2 ${cum >= 0 ? 'tp-pos' : 'tp-neg'}" title="realized day P&L">${Math.round(cum).toLocaleString('en-US')} RON</span>
     <span class="pill2 r2" title="model's expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
@@ -1048,9 +1047,9 @@ function widgetData() {
   const acc = db.prepare(`
     SELECT COUNT(*) n, SUM(CASE WHEN (p.prob_long>0.5)=(p.realized_imb>0) THEN 1 ELSE 0 END) h
     FROM predictions p
-    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE actionable=1 GROUP BY ts_utc) x
+    JOIN (SELECT ts_utc, MAX(run_at) mr FROM predictions WHERE actionable=1 AND date_ro=? GROUP BY ts_utc) x
       ON x.ts_utc=p.ts_utc AND x.mr=p.run_at
-    WHERE p.date_ro=? AND p.realized_imb IS NOT NULL`).get(today);
+    WHERE p.date_ro=? AND p.realized_imb IS NOT NULL`).get(today, today);
   return {
     date: today, pnl: Math.round(pnl), settled,
     acc: acc.n ? Math.round(acc.h / acc.n * 100) : null,
@@ -1129,14 +1128,25 @@ async function liveSEN(date, maxAge = 45000) {
 // live UI and RECORDS every distinct snapshot (decoded core + full raw) to sen_live for prediction.
 const senFilter = require('./sen_filter');
 try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', e.message); }
-// live sign predictor (P(surplus) per upcoming interval). Model trained on settled history, cached + retrained hourly.
+// live sign predictor + weather→RES model. Served from model_cache (precomputed by train_models.js every ~30min) —
+// NEVER trained on the request/event-loop path unless the precompute is stale/absent (then a single inline train, hourly).
 const signModel = require('./sign_model');
-let signCache = { model: null, at: 0 };
-function getSignModel() { if (!signCache.model || Date.now() - signCache.at > 3600000) { try { signCache = { model: signModel.train(db), at: Date.now() }; } catch (e) { console.error('sign_model train:', e.message); } } return signCache.model; }
-// my weather→RES-generation model (challenger to ENTSO-E) — refit hourly
 const resModel = require('./res_model');
-let resCache = { model: null, at: 0 };
-function getResModel() { if (!resCache.model || Date.now() - resCache.at > 3600000) { try { resCache = { model: resModel.train(db), at: Date.now() }; } catch (e) { console.error('res_model train:', e.message); resCache = { model: null, at: Date.now() }; } } return resCache.model; }
+let signCache = { model: null, trainedAt: null, inlineAt: 0 };
+let resCache = { model: null, trainedAt: null, inlineAt: 0 };
+function loadModel(name, cache, trainFn) {
+  try {
+    const r = db.prepare('SELECT json, trained_at FROM model_cache WHERE name=?').get(name);
+    if (r && Date.now() - Date.parse(r.trained_at) < 5400000) { // fresh precompute (<90min)
+      if (cache.trainedAt !== r.trained_at) { cache.model = JSON.parse(r.json); cache.trainedAt = r.trained_at; }
+      return cache.model;
+    }
+  } catch { /* model_cache may not exist yet */ }
+  if (!cache.model || Date.now() - cache.inlineAt > 3600000) { try { cache.model = trainFn(db); cache.inlineAt = Date.now(); cache.trainedAt = 'inline'; } catch (e) { console.error(name + '_model train:', e.message); } }
+  return cache.model;
+}
+function getSignModel() { return loadModel('sign', signCache, signModel.train); }
+function getResModel() { return loadModel('res', resCache, resModel.train); }
 // Live regime anchors as of a publication-safe cutoff (= decision time for all upcoming intervals; matches training):
 //   persist = freshest settled imbalance; fracsurp = surplus-fraction of the last FRAC_W settled; netting = export−import.
 function liveRegime(cutoffMs) {
@@ -1160,6 +1170,22 @@ function notifBalFor(date, isp) {
   if (net == null) { let e = 0, i = 0, any = false; for (const b of ['HU', 'BG', 'RS', 'UA', 'MD']) { const ev = m['sched_RO_' + b], iv = m['sched_' + b + '_RO']; if (ev != null) { e += ev; any = true; } if (iv != null) { i += iv; any = true; } } if (!any) return null; net = e - i; }
   return P - C - net;
 }
+// Batched Notif bal for a WHOLE day in 2 queries (vs notifBalFor's 2 queries PER interval) — for the hot /api/predict_sign loop.
+function notifBalMapFor(date) {
+  const byIsp = {};
+  try { for (const r of _nbStmt2.all(date)) (byIsp[r.isp] || (byIsp[r.isp] = {}))[r.series] = r.value; } catch { return new Map(); }
+  const com = {}; try { for (const r of _nbPi2.all(date)) com[r.isp] = r.commercial; } catch { /* ignore */ } // last row per isp (asc) = latest commercial
+  const out = new Map();
+  for (const isp of Object.keys(byIsp)) {
+    const s = byIsp[isp]; const P = s.damas_notif_prod, C = s.damas_notif_cons; if (P == null || C == null) continue;
+    let net = com[isp];
+    if (net == null) { let e = 0, i = 0, any = false; for (const b of ['HU', 'BG', 'RS', 'UA', 'MD']) { const ev = s['sched_RO_' + b], iv = s['sched_' + b + '_RO']; if (ev != null) { e += ev; any = true; } if (iv != null) { i += iv; any = true; } } if (!any) continue; net = e - i; }
+    out.set(+isp, P - C - net);
+  }
+  return out;
+}
+const _nbStmt2 = db.prepare("SELECT isp, series, value FROM series WHERE date_ro=? AND series IN ('damas_notif_prod','damas_notif_cons','sched_RO_HU','sched_RO_BG','sched_RO_RS','sched_RO_UA','sched_RO_MD','sched_HU_RO','sched_BG_RO','sched_RS_RO','sched_UA_RO','sched_MD_RO')");
+const _nbPi2 = db.prepare('SELECT isp, commercial FROM xb_pi_snap WHERE date_ro=? AND commercial IS NOT NULL ORDER BY isp, pulled_at');
 // LOCK the forecast at gate-close: the CURRENT TRADEABLE interval (the gate row = start ≥ current-ISP-start + 75min)
 // stays LIVE; once the gate advances past it (it becomes ISP+4, untradeable) its prediction freezes + is RECORDED
 // (append-only, lock-once) so it shows vs the realized outcome + can be scored. The gate row is NEVER locked.
@@ -1362,11 +1388,10 @@ async function predictPage(date) {
   try {
     const resM = getResModel();
     if (resM) {
-      const wRows = db.prepare("SELECT ts_utc, var, pulled_at, value FROM weather WHERE var IN ('shortwave_radiation','wind_speed_100m') AND ts_utc>=? AND ts_utc<? AND value IS NOT NULL").all(addDays(date, -1) + 'T20:00:00Z', addDays(date, 1) + 'T04:00:00Z');
-      const latest = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (!latest[k] || r.pulled_at > latest[k]) latest[k] = r.pulled_at; }
-      const agg = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (r.pulled_at !== latest[k]) continue; (agg[k] || (agg[k] = { s: 0, n: 0 })).s += r.value; agg[k].n++; }
+      // fast: pre-materialized latest-run ensemble mean (weather_hourly), already deduped → agg holds {s:mean,n:1}
+      const agg = {}; for (const r of db.prepare("SELECT ts_utc, var, value FROM weather_hourly WHERE var IN ('shortwave_radiation','wind_speed_100m') AND ts_utc>=? AND ts_utc<?").all(addDays(date, -1) + 'T20:00:00Z', addDays(date, 1) + 'T04:00:00Z')) agg[r.var + '|' + r.ts_utc] = { s: r.value, n: 1 };
       const base = new Map();
-      for (const ts of new Set(wRows.map((r) => r.ts_utc))) { const rd = agg['shortwave_radiation|' + ts], wd = agg['wind_speed_100m|' + ts];
+      for (const ts of new Set(Object.keys(agg).map((k) => k.split('|')[1]))) { const rd = agg['shortwave_radiation|' + ts], wd = agg['wind_speed_100m|' + ts];
         base.set(ts.slice(0, 13), { solar: rd ? resModel.predictSolar(resM, rd.s / rd.n) : null, wind: wd ? resModel.predictWind(resM, wd.s / wd.n) : null }); }
       // intraday factor: today's realized (sen_live mix) vs base over ELAPSED daytime intervals (today only)
       if (date === nowInfo.date) {
@@ -2060,9 +2085,8 @@ const server = http.createServer(async (req, res) => {
       const resM = getResModel(); if (!resM) return json({ ok: false });
       const qd = url.searchParams.get('date') || today; const RES_DAYS = 4;
       const from = addDays(qd, -RES_DAYS) + 'T00:00:00Z', to = addDays(qd, 1) + 'T00:00:00Z';
-      const wRows = db.prepare("SELECT ts_utc,var,pulled_at,value FROM weather WHERE var IN ('shortwave_radiation','wind_speed_100m') AND ts_utc>=? AND ts_utc<? AND value IS NOT NULL").all(from, to);
-      const latest = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (!latest[k] || r.pulled_at > latest[k]) latest[k] = r.pulled_at; }
-      const agg = {}; for (const r of wRows) { const k = r.var + '|' + r.ts_utc; if (r.pulled_at !== latest[k]) continue; (agg[k] || (agg[k] = { s: 0, n: 0 })).s += r.value; agg[k].n++; }
+      // fast: pre-materialized latest-run ensemble mean (weather_hourly), already deduped → agg holds {s:mean,n:1}
+      const agg = {}; for (const r of db.prepare("SELECT ts_utc, var, value FROM weather_hourly WHERE var IN ('shortwave_radiation','wind_speed_100m') AND ts_utc>=? AND ts_utc<?").all(from, to)) agg[r.var + '|' + r.ts_utc] = { s: r.value, n: 1 };
       const hg = (series) => { const m = {}; for (const r of db.prepare('SELECT ts_utc,value FROM series WHERE series=? AND ts_utc>=? AND ts_utc<? AND value IS NOT NULL').all(series, from, to)) { const h = r.ts_utc.slice(0, 13); (m[h] || (m[h] = { s: 0, n: 0 })).s += r.value; m[h].n++; } const o = {}; for (const h in m) o[h] = m[h].s / m[h].n; return o; };
       const aS = hg('gen_actual_solar'), aW = hg('gen_actual_wind_onshore'), eS = hg('ws_fc_cur_solar'), eW = hg('ws_fc_cur_wind_onshore');
       const acc = { sol: { m: 0, e: 0, n: 0 }, win: { m: 0, e: 0, n: 0 }, tSol: { m: 0, e: 0, n: 0 }, tWin: { m: 0, e: 0, n: 0 } };
@@ -2084,15 +2108,18 @@ const server = http.createServer(async (req, res) => {
         const reg = liveRegime(nowMs - signModel.PUB_LAG * signModel.MIN);
         const persist = reg ? reg.persist : null;
         if (persist !== null) {
-          const piStmt = db.prepare('SELECT pulled_at, commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? ORDER BY pulled_at');
+          // batch: all PI frames + all Notif bal for the day up front (was 3 queries PER interval → a few total)
+          const framesByIsp = new Map();
+          try { for (const r of db.prepare('SELECT isp, pulled_at, commercial FROM xb_pi_snap WHERE date_ro=? ORDER BY isp, pulled_at').all(qd)) (framesByIsp.get(r.isp) || framesByIsp.set(r.isp, []).get(r.isp)).push({ p: Date.parse(r.pulled_at), c: r.commercial }); } catch { /* ignore */ }
+          const nbMap = notifBalMapFor(qd);
           for (const { isp, ts } of dayTimestamps(qd)) {
             if (isp < signModel.WIN_FROM || isp > signModel.WIN_TO) continue;
             const Tms = new Date(ts).getTime(); const lead = (Tms - nowMs) / signModel.MIN;
             if (Tms < gateMs) continue;                     // TRADEABLE only (start ≥ gate = current ISP+5, incl. the current tradeable/gate row which stays LIVE); untradeable show their LOCKED forecast
-            let frames = []; try { frames = piStmt.all(qd, isp).map((f) => ({ p: Date.parse(f.pulled_at), c: f.commercial })); } catch { /* ignore */ }
+            const frames = framesByIsp.get(isp) || [];
             const pi_move = frames.length >= 2 ? frames[frames.length - 1].c - frames[0].c : 0; // cumulative → model
             const burst = recentMove(frames, nowMs); const pa = Math.abs(burst); // recent burst → panic flag
-            const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(qd, isp), isp, lead);
+            const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, nbMap.has(isp) ? nbMap.get(isp) : null, isp, lead);
             out.push({ isp, p: +p.toFixed(3), conf: Math.round(Math.max(p, 1 - p) * 100), sign: p >= 0.5 ? 'S' : 'D', panic: pa >= PANIC_MW ? { abs: Math.round(pa), dir: burst > 0 ? 'S' : 'D', opposes: (burst > 0 ? 'S' : 'D') !== (persist > 0 ? 'S' : 'D') } : null });
           }
         }
