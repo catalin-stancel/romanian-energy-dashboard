@@ -54,10 +54,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_pred_day ON predictions(date_ro, ts_utc, run_at, actionable);
   CREATE INDEX IF NOT EXISTS idx_bets_day ON bets(date_ro, ts_utc, run_at, actionable);
 `);
-// materialized fast tables the app reads from (populated by the pull_weather + train_models jobs, which run within
-// ~30s of boot then on schedule; readers fall back gracefully until first populated).
-db.exec('CREATE TABLE IF NOT EXISTS weather_hourly(ts_utc TEXT, var TEXT, value REAL, pulled_at TEXT, PRIMARY KEY(ts_utc,var))');
-db.exec('CREATE TABLE IF NOT EXISTS model_cache(name TEXT PRIMARY KEY, json TEXT, trained_at TEXT)');
 
 function loadConfig() {
   const defaults = { eur_ron: 5.24, trade_window_cet: [7, 22], max_mwh_per_isp: 2.5, min_mwh_per_isp: 2.0, risk_aversion: 0.5 };
@@ -392,6 +388,7 @@ const NAV = (active, date, refreshSec, extras) => `
     localStorage.setItem('showPreds',off?'0':'1');setPredLabel();}
   // show/hide the per-source generation split (Real prod header switch); persisted per device
   function toggleMix(){var off=document.documentElement.classList.toggle('mix-off');localStorage.setItem('showMix',off?'0':'1');}
+  function toggleXbf(){var off=document.documentElement.classList.toggle('xbf-off');localStorage.setItem('showXbf',off?'0':'1');}
   // RES fcst column: weather icons (default) ⇄ RES generation forecast; persisted per device
   function setResLabel(){var h=document.getElementById('reshdr');if(h)h.innerHTML=document.documentElement.classList.contains('res-on')?'RES fcst<br><small>MW</small>':'Weather<br><small>100m km/h</small>';}
   function toggleRes(){var on=document.documentElement.classList.toggle('res-on');localStorage.setItem('showRes',on?'1':'0');setResLabel();}
@@ -425,7 +422,7 @@ const NAV = (active, date, refreshSec, extras) => `
 // YellowGrid Design System (data/design/colors_and_type.css) — brand yellow as accent over a
 // themeable base. DARK is the default theme; html[data-theme='light'] restores the original
 // light palette. The inline script runs before CSS paint so there is no theme flash.
-const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off');if((localStorage.getItem('showMix')||'0')!=='1')document.documentElement.classList.add('mix-off');if(localStorage.getItem('showRes')==='1')document.documentElement.classList.add('res-on')</script>
+const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off');if((localStorage.getItem('showMix')||'0')!=='1')document.documentElement.classList.add('mix-off');if(localStorage.getItem('showRes')==='1')document.documentElement.classList.add('res-on');if(localStorage.getItem('showXbf')==='0')document.documentElement.classList.add('xbf-off')</script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
@@ -551,6 +548,7 @@ tr.expanded:not(.gateopen) td{border-top:3px solid var(--yg-yellow)} tr.expanded
 tr.hx .histlbl{background:var(--yg-yellow);color:var(--yg-black)}
 .fc-imb{font-style:italic;font-weight:600;font-size:12px;opacity:.9}.fc-imb small{font-weight:600;opacity:.7}
 .fc-lock{font-weight:700;font-size:11px;opacity:.95;border:1px solid var(--border-2);border-radius:5px;padding:0 4px} /* locked = boxed, not italic */
+.pfc-lock{font-weight:600;border:1px solid var(--border-2);border-radius:5px;padding:0 4px;opacity:.9} /* frozen prod forecast (independent of the predictions toggle) */
 .fc-r{float:right;margin-left:6px} /* glued to the right of the Imbalance cell */
 .pflag{cursor:help;font-size:12px;margin-left:3px;color:#e6a700} /* big PI repositioning on this interval */
 .pflag-x{color:var(--ic-d);font-weight:700} /* repositioning AGAINST the current state (possible flip) */
@@ -575,6 +573,16 @@ html.res-on .restgl::after{left:11px}
 .mixtgl::after{content:'';position:absolute;top:1px;left:11px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .15s}
 html.mix-off .mixtgl{background:var(--border-2)}
 html.mix-off .mixtgl::after{left:1px}
+.xbftgl{cursor:pointer;display:inline-block;width:22px;height:12px;border-radius:7px;background:var(--ic-s);position:relative;vertical-align:middle;margin-left:5px;transition:background .15s}
+.xbftgl::after{content:'';position:absolute;top:1px;left:11px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .15s}
+html.xbf-off .xbftgl{background:var(--border-2)}
+html.xbf-off .xbftgl::after{left:1px}
+html.xbf-off .xbf{display:none!important}
+/* Real X-B gradient: green = less import than notified (surplus lean), red = more (deficit). The tint composites
+   over a FIXED base (not the zebra stripe) so the column gradient FLOWS smoothly row to row. */
+tr td.xbtS,tr td.xbtF{background-color:var(--bg-surface);background-image:linear-gradient(var(--xbt),var(--xbt))}
+html.xbf-off tr td.xbtF{background-image:none;background-color:transparent} /* estimate hidden → tint off, zebra restored */
+html.xbf-off tr:nth-child(even) td.xbtF{background-color:var(--bg-subtle)}
 /* model predictions hidden by default (traders not yet briefed); header toggle flips html.preds-off */
 html.preds-off .fc-imb,html.preds-off .fc-lock,html.preds-off .pflag,html.preds-off #pulsebar,html.preds-off #scorebar{display:none!important}
 .predtgl{cursor:pointer} .predtgl.predon{color:var(--ic-s);font-weight:700}
@@ -876,10 +884,16 @@ function piPage(date) {
   const winFrom = (wh0 + 1) * 4 + 1, winTo = (wh1 + 1) * 4 + 1; // +1 → include the wh1:00-starting row (e.g. 22:00)
   const nowInfo = roDateIsp(new Date());
   const nowMs = Date.now();
+  // preload every per-interval point-series for the day in ONE indexed query (was ~11 sv() PK
+  // lookups × 96 rows ≈ 1000+ prepared-stmt hits per request) → svL() reads from this map
+  const PT_SERIES = ['damas_est_sys_imbalance', 'damas_est_price_pos', 'pzu_ron', 'da_price', 'gen_fc_da', 'damas_consumption', 'load_actual', 'load_fc_da', 'net_pos_da'];
+  const ptMap = new Map();
+  for (const r of db.prepare(`SELECT series, ts_utc, value FROM series WHERE date_ro=? AND series IN (${PT_SERIES.map(() => '?').join(',')})`).all(date, ...PT_SERIES)) ptMap.set(r.series + '|' + r.ts_utc, r.value);
+  const svL = (name, ts) => { const v = ptMap.get(name + '|' + ts); return v === undefined ? null : v; };
   // last interval already settled with real data (gets the green highlight)
   let lastRealIsp = null;
   for (const { isp, ts } of dayTimestamps(date)) {
-    if (new Date(ts).getTime() + 900000 <= nowMs && sv('damas_est_sys_imbalance', ts) !== null) lastRealIsp = isp;
+    if (new Date(ts).getTime() + 900000 <= nowMs && svL('damas_est_sys_imbalance', ts) !== null) lastRealIsp = isp;
   }
   let cum = 0, settled = 0, committed = 0, hits = 0, judged = 0, lockHits = 0, lockJudged = 0;
   // external desk day-ahead PZU plan (BUY/SELL/HOLD + Q) — shown as a reference column
@@ -893,10 +907,10 @@ function piPage(date) {
     const isPast = tsMs + 900000 <= nowMs;
     const p1 = d1.get(isp);
     const pl = live.get(isp) || piLocked.get(isp);
-    const imb = sv('damas_est_sys_imbalance', ts);
-    const imbPrice = sv('damas_est_price_pos', ts);
-    const pzuOff = sv('pzu_ron', ts);
-    const pzuRon = pzuOff !== null ? pzuOff : (sv('da_price', ts) !== null ? sv('da_price', ts) * cfg.eur_ron : null);
+    const imb = svL('damas_est_sys_imbalance', ts);
+    const imbPrice = svL('damas_est_price_pos', ts);
+    const pzuOff = svL('pzu_ron', ts);
+    const pzuRon = pzuOff !== null ? pzuOff : (svL('da_price', ts) !== null ? svL('da_price', ts) * cfg.eur_ron : null);
     const ub = userBets.get(isp);
     const qty = ub?.qty ?? null;
     if (qty) committed += Math.abs(qty);
@@ -952,15 +966,15 @@ function piPage(date) {
       prodTitle = Object.entries(gen).sort((a, b) => b[1] - a[1])
         .map(([k, v]) => `${SRC_LABEL[k] || k}: ${Math.round(v)} MW`).join('\n');
     } else {
-      const fc = sv('gen_fc_da', ts);
+      const fc = svL('gen_fc_da', ts);
       if (fc !== null) { prodC = String(Math.round(fc)); prodTitle = 'DA generation forecast (total)'; }
     }
     if (isPast) {
-      const dc = sv('damas_consumption', ts);
-      const la = sv('load_actual', ts);
+      const dc = svL('damas_consumption', ts);
+      const la = svL('load_actual', ts);
       consC = dc !== null ? String(Math.round(dc * 4)) : la !== null ? String(Math.round(la)) : '';
     } else {
-      const lf = sv('load_fc_da', ts);
+      const lf = svL('load_fc_da', ts);
       if (lf !== null) consC = String(Math.round(lf));
     }
     {
@@ -975,7 +989,7 @@ function piPage(date) {
         xbC = `<span title="${(isPast ? 'physical flows (scheduled)' : 'scheduled') + ' — ' + xb.parts.join(' | ')}">${arrow(xb.net)}</span>${schedBr}`;
       }
     }
-    const npda = sv('net_pos_da', ts);
+    const npda = svL('net_pos_da', ts);
     const pzuCommitC = npda !== null ? `${npda >= 0 ? '↑' : '↓'}${Math.round(Math.abs(npda))}` : '';
     const inWindow = isp >= winFrom && isp <= winTo;
     const priceClass = inWindow && pnl !== null ? (pnl >= 0 ? 'pnlpos' : 'pnlneg') : '';
@@ -1027,7 +1041,7 @@ ${body}</table></div>
 
 // ---- widget support: key auth (auto-generated on first boot) + compact day summary ----
 const WIDGET_KEY = (() => {
-  const f = path.join(process.env.DATA_DIR || path.join(__dirname, '..', 'data'), 'widget.key'); // LOCAL: tool/widget.key
+  const f = path.join(process.env.DATA_DIR || path.join(__dirname, '..', 'data'), 'widget.key'); // CLOUD: /data on Render
   try { return fs.readFileSync(f, 'utf8').trim(); }
   catch {
     const k = require('crypto').randomBytes(16).toString('hex');
@@ -1144,12 +1158,13 @@ async function liveSEN(date, maxAge = 45000) {
 // live UI and RECORDS every distinct snapshot (decoded core + full raw) to sen_live for prediction.
 const senFilter = require('./sen_filter');
 try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', e.message); }
-// live sign predictor + weather→RES model. Served from model_cache (precomputed by train_models.js every ~30min) —
-// NEVER trained on the request/event-loop path unless the precompute is stale/absent (then a single inline train, hourly).
+// live sign predictor (P(surplus) per upcoming interval). Model trained on settled history, cached + retrained hourly.
 const signModel = require('./sign_model');
 const resModel = require('./res_model');
 let signCache = { model: null, trainedAt: null, inlineAt: 0 };
 let resCache = { model: null, trainedAt: null, inlineAt: 0 };
+// Load a precomputed model from model_cache (written by tool/train_models.js, every ~30min) — NEVER train on the
+// request/event-loop path when a fresh precompute exists. Fall back to inline train (hourly) only if the job is down.
 function loadModel(name, cache, trainFn) {
   try {
     const r = db.prepare('SELECT json, trained_at FROM model_cache WHERE name=?').get(name);
@@ -1336,6 +1351,208 @@ function pzuForecast(date) {
   return out;
 }
 
+// Hourly deviation curve of SEN real prod vs notif prod — near-deterministic shape (midday −700 MW solar
+// over-scheduling, evening/night +200..450; real>notif on ~100% of days in those hours). Used as a SECOND,
+// information-diverse route for the forward Real-prod forecast: notif + curve[hour] + today's running anomaly.
+// Blending it 50/50 with the schedule-consistent route cut MAE 143→114 MW at the 75-min lead (LODO-validated
+// 2026-07-03, tool/_prod_curve_fc.js; error corr between routes only 0.32). Curve cached 10 min.
+// v2 (2026-07-03, tool/_prod_fc_lab.js): SOLAR-AWARE curve — the deviation deepens ~beta≈−0.30 MW per MW of
+// solar forecast above the hourly norm (consistent with real solar ≈ 0.70×forecast), and the anomaly uses our
+// own ~1-min-fresh sen_live (no publication lag). LODO-validated: 113.7 → 105.7 MW MAE @75min.
+const isWeDay = (d) => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 0 || w === 6; };
+// hour('YYYY-MM-DDTHH') → forecast temperature (RO ensemble mean), for the curve models' AC-load term
+let _wxTCache = { at: 0, m: new Map() };
+function wxTempMap() {
+  if (Date.now() - _wxTCache.at < 600000) return _wxTCache.m;
+  const m = new Map();
+  try { for (const r of db.prepare("SELECT ts_utc, value FROM weather_hourly WHERE var='temperature_2m'").all()) m.set(r.ts_utc.slice(0, 13), r.value); } catch { /* weather_hourly may be empty */ }
+  _wxTCache = { at: Date.now(), m };
+  return m;
+}
+// Build a day-type-aware curve model from {isp, dev, we, sol} rows: pooled hourly means, plus weekday/weekend
+// EFFECTIVE curves (day-type cell used when it has ≥8 obs, else pooled fallback — sharpens as weekends accumulate).
+// Motivated by the CONS curve check (2026-07-02): the weekend midday valley is ~2.4× the weekday one (−736 vs −302 @11h).
+function buildCurveModel(rows) {
+  const H = (isp) => Math.floor((((isp - 1) * 15 - 60 + 1440) % 1440) / 60);
+  const acc = Array.from({ length: 24 }, () => ({ s: 0, n: 0, sol: 0, nsol: 0, sWd: 0, nWd: 0, sWe: 0, nWe: 0, tp: 0, ntp: 0 }));
+  for (const r of rows) { const a = acc[H(r.isp)]; a.s += r.dev; a.n++; if (r.sol != null) { a.sol += r.sol; a.nsol++; } if (r.temp != null) { a.tp += r.temp; a.ntp++; } if (r.we) { a.sWe += r.dev; a.nWe++; } else { a.sWd += r.dev; a.nWd++; } }
+  const c = new Array(24).fill(null), sm = new Array(24).fill(null), cWd = new Array(24).fill(null), cWe = new Array(24).fill(null), tm = new Array(24).fill(null);
+  let ok = 0;
+  for (let h = 0; h < 24; h++) {
+    const a = acc[h]; if (a.n < 5) continue;
+    c[h] = a.s / a.n; ok++;
+    if (a.nsol >= 5) sm[h] = a.sol / a.nsol;
+    if (a.ntp >= 5) tm[h] = a.tp / a.ntp;
+    cWd[h] = a.nWd >= 8 ? a.sWd / a.nWd : c[h];
+    cWe[h] = a.nWe >= 8 ? a.sWe / a.nWe : c[h];
+  }
+  if (ok < 20) return null;
+  let sxy = 0, sxx = 0;
+  for (const r of rows) { const h = H(r.isp); if (c[h] == null || sm[h] == null || r.sol == null) continue; const x = r.sol - sm[h], y = r.dev - c[h]; sxy += x * y; sxx += x * x; }
+  const beta = sxx > 0 ? sxy / sxx : 0;
+  // temperature beta on the residual AFTER the solar term (sequential — sunny↔hot are collinear; targets AC load,
+  // cons anomaly ↔ temp anomaly r=0.19/+18 MW·°C measured 2026-07-03, tool/_wx_anom.js)
+  let txy = 0, txx = 0;
+  for (const r of rows) { const h = H(r.isp); if (c[h] == null || tm[h] == null || r.temp == null) continue; const y = r.dev - c[h] - (r.sol != null && sm[h] != null ? beta * (r.sol - sm[h]) : 0); const x = r.temp - tm[h]; txy += x * y; txx += x * x; }
+  return { cWd, cWe, sm, beta, tm, betaT: txx > 0 ? txy / txx : 0 };
+}
+let _pdcCache = { at: 0, model: null };
+function prodCurveModel() {
+  if (Date.now() - _pdcCache.at < 600000) return _pdcCache.model;
+  let model = null;
+  try {
+    const rows = db.prepare(`SELECT sl.date_ro d, sl.isp, sl.p, se.value nv, se.ts_utc ts, sf.value sol
+      FROM (SELECT date_ro, isp, AVG(prod) p FROM sen_live WHERE prod IS NOT NULL GROUP BY date_ro, isp HAVING COUNT(*)>=3) sl
+      JOIN series se ON se.series='damas_notif_prod' AND se.date_ro=sl.date_ro AND se.isp=sl.isp
+      LEFT JOIN series sf ON sf.series='ws_fc_da_solar' AND sf.date_ro=sl.date_ro AND sf.isp=sl.isp`).all();
+    const T = wxTempMap();
+    model = buildCurveModel(rows.map((r) => ({ isp: r.isp, dev: r.p - r.nv, we: isWeDay(r.d), sol: r.sol, temp: T.get(r.ts.slice(0, 13)) ?? null })));
+  } catch { /* sen_live may be empty */ }
+  _pdcCache = { at: Date.now(), model };
+  return model;
+}
+// expected deviation for an interval = curve interpolated at ISP resolution + beta·(solarFc − hourly-mean solarFc).
+// INTERPOLATED between hour midpoints (cyclic) — the raw hourly curve stepped (e.g. +139 MW exactly at 13:00),
+// which produced implausible jumps the trader's eye rightly rejected (2026-07-03); interpolation spreads the
+// narrowing smoothly across the hour (LODO MAE 105.4 vs 105.8 stepped).
+const _pdInterp = (arr, isp) => {
+  const mins = (((isp - 1) * 15 - 60) + 1440) % 1440;
+  let hf = mins / 60 - 0.5; if (hf < 0) hf += 24;
+  const h0 = Math.floor(hf) % 24, h1 = (h0 + 1) % 24, w = hf - Math.floor(hf);
+  if (arr[h0] == null || arr[h1] == null) return arr[Math.floor(mins / 60)];
+  return arr[h0] * (1 - w) + arr[h1] * w;
+};
+const pdExpect = (m, isp, sol, we, temp) => { const c = _pdInterp(we ? m.cWe : m.cWd, isp); if (c == null) return null; const sm = _pdInterp(m.sm, isp); const tm = _pdInterp(m.tm, isp); return c + (sol != null && sm != null ? m.beta * (sol - sm) : 0) + (temp != null && tm != null ? m.betaT * (temp - tm) : 0); };
+// today's running anomaly vs the (solar-aware) expected deviation, over the last 4 settled intervals (~1-min fresh).
+// Returns { gap, slope, center }: gap = mean anomaly; slope = its OLS trend per 15-min step; center = mean history
+// time in 15-min steps. On RAMP days a flat gap trails reality by ~7 intervals (2026-07-02: locks ran +250..300 low
+// while real−notif climbed +350 in 2h — user caught it); a DAMPED trend extrapolation (λ=0.25, clamped ±300) fixes
+// exactly that failure: LODO 108.3→106.7 overall, 123.9→119.6 on ramp intervals (tool/_prod_fc_lab2.js).
+const PD_TREND_LAMBDA = 0.25, PD_TREND_CLAMP = 300, PD_STEP = 15 * 60000;
+const PD_TREND_HMAX = 8;   // trend extrapolation horizon cap (~2h): validated at the 75-min lead; beyond it the
+                           // midday slope leaked into EVENING rows (−285 MW at 20:45, user-caught 2026-07-02)
+const XB_PHYS = 2900;      // physical cross-border capacity clip (virtual-MWh rule: schedule reaches ±5260 vs
+                           // physical ±2950 — clip estimate INPUTS so virtual imports don't drag the prod/XB fcst)
+function prodAnomGap(m) {
+  try {
+    const ni = roDateIsp(new Date());
+    const rows = db.prepare(`SELECT sl.date_ro d, sl.isp, sl.p, se.value v, se.ts_utc ts, sf.value sol
+      FROM (SELECT date_ro, isp, AVG(prod) p, COUNT(*) c FROM sen_live WHERE prod IS NOT NULL GROUP BY date_ro, isp HAVING c>=3) sl
+      JOIN series se ON se.series='damas_notif_prod' AND se.date_ro=sl.date_ro AND se.isp=sl.isp
+      LEFT JOIN series sf ON sf.series='ws_fc_da_solar' AND sf.date_ro=sl.date_ro AND sf.isp=sl.isp
+      WHERE sl.date_ro<? OR (sl.date_ro=? AND sl.isp<?)
+      ORDER BY sl.date_ro DESC, sl.isp DESC LIMIT 4`).all(ni.date, ni.date, ni.isp);
+    if (rows.length < 4) return null;
+    const T = wxTempMap();
+    const pts = [];
+    for (const r of rows) { const e = pdExpect(m, r.isp, r.sol, isWeDay(r.d), T.get(r.ts.slice(0, 13)) ?? null); if (e == null) return null; pts.push({ x: Date.parse(r.ts) / PD_STEP, v: r.p - r.v - e }); }
+    const gap = pts.reduce((s, p) => s + p.v, 0) / pts.length;
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    let sxy = 0, sxx = 0; for (const p of pts) { sxy += (p.x - cx) * (p.v - gap); sxx += (p.x - cx) ** 2; }
+    return { gap, slope: sxx > 0 ? sxy / sxx : 0, center: cx };
+  } catch { return null; }
+}
+// gap projected to a target interval start (epoch ms): damped trend extrapolation, horizon-capped + clamped
+const pdGapAt = (g, tsMs) => g.gap + Math.max(-PD_TREND_CLAMP, Math.min(PD_TREND_CLAMP, g.slope * Math.min(tsMs / PD_STEP - g.center, PD_TREND_HMAX) * PD_TREND_LAMBDA));
+// CONSUMPTION, same user-spec architecture (2026-07-02): fixed Notif cons + hourly deviation curve (solar-aware —
+// distributed PV depresses metered consumption) + intraday correction from REALISED consumption only.
+// Cost vs the cons_fc anchor: ~equal @15min (96 vs 95), −8..−18 MW @45-75min (tool/_prod_fc_lab3.js) — accepted for symmetry.
+let _cdcCache = { at: 0, model: null };
+function consCurveModel() {
+  if (Date.now() - _cdcCache.at < 600000) return _cdcCache.model;
+  let model = null;
+  try {
+    const rows = db.prepare(`SELECT sl.date_ro d, sl.isp, sl.c cn, se.value nv, se.ts_utc ts, sf.value sol
+      FROM (SELECT date_ro, isp, AVG(cons) c FROM sen_live WHERE cons IS NOT NULL GROUP BY date_ro, isp HAVING COUNT(*)>=3) sl
+      JOIN series se ON se.series='damas_notif_cons' AND se.date_ro=sl.date_ro AND se.isp=sl.isp
+      LEFT JOIN series sf ON sf.series='ws_fc_da_solar' AND sf.date_ro=sl.date_ro AND sf.isp=sl.isp`).all();
+    const T = wxTempMap();
+    model = buildCurveModel(rows.map((r) => ({ isp: r.isp, dev: r.cn - r.nv, we: isWeDay(r.d), sol: r.sol, temp: T.get(r.ts.slice(0, 13)) ?? null })));
+  } catch { /* sen_live may be empty */ }
+  _cdcCache = { at: Date.now(), model };
+  return model;
+}
+function consAnomGap(m) {
+  try {
+    const ni = roDateIsp(new Date());
+    const rows = db.prepare(`SELECT sl.date_ro d, sl.isp, sl.c cn, se.value v, se.ts_utc ts, sf.value sol
+      FROM (SELECT date_ro, isp, AVG(cons) c, COUNT(*) n FROM sen_live WHERE cons IS NOT NULL GROUP BY date_ro, isp HAVING n>=3) sl
+      JOIN series se ON se.series='damas_notif_cons' AND se.date_ro=sl.date_ro AND se.isp=sl.isp
+      LEFT JOIN series sf ON sf.series='ws_fc_da_solar' AND sf.date_ro=sl.date_ro AND sf.isp=sl.isp
+      WHERE sl.date_ro<? OR (sl.date_ro=? AND sl.isp<?)
+      ORDER BY sl.date_ro DESC, sl.isp DESC LIMIT 4`).all(ni.date, ni.date, ni.isp);
+    if (rows.length < 4) return null;
+    const T = wxTempMap();
+    const pts = [];
+    for (const r of rows) { const e = pdExpect(m, r.isp, r.sol, isWeDay(r.d), T.get(r.ts.slice(0, 13)) ?? null); if (e == null) return null; pts.push({ x: Date.parse(r.ts) / PD_STEP, v: r.cn - r.v - e }); }
+    const gap = pts.reduce((s, p) => s + p.v, 0) / pts.length;
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    let sxy = 0, sxx = 0; for (const p of pts) { sxy += (p.x - cx) * (p.v - gap); sxx += (p.x - cx) ** 2; }
+    return { gap, slope: sxx > 0 ? sxy / sxx : 0, center: cx };
+  } catch { return null; }
+}
+
+// ---- LOCK the production forecast at the trade gate (mirrors the sign predictor's lock discipline) ----
+// The forward Real-prod forecast stays LIVE (baseline, refreshed every 15s) while an interval is still tradeable
+// (start ≥ current-ISP-start + 75min). When the gate advances past it, the CURRENT blend freezes into prod_lock
+// (lock-once, append-only) so settled rows show forecast-vs-actual on record and the accuracy is scoreable.
+try { db.exec('CREATE TABLE IF NOT EXISTS prod_lock(date_ro TEXT, isp INTEGER, fcst REAL, sched REAL, curver REAL, locked_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('prod_lock table:', e.message); }
+try { db.exec('ALTER TABLE prod_lock ADD COLUMN xb REAL'); } catch { /* exists */ } // the Real X-B estimate (fcst − fcstCons) recorded at the same gate
+try { db.exec('ALTER TABLE prod_lock ADD COLUMN cons REAL'); } catch { /* exists */ } // the Fcst cons recorded at the same gate
+// DB-only blend (same formulas the page renders; validated ~106 MW MAE @75min — see prodCurveModel)
+function prodBlendAt(date, isp) {
+  const m = prodCurveModel(); if (!m) return null;
+  const one = (s) => { try { const r = db.prepare('SELECT value v FROM series WHERE series=? AND date_ro=? AND isp=?').get(s, date, isp); return r ? r.v : null; } catch { return null; } };
+  let tsMs = null; try { const r = db.prepare("SELECT ts_utc FROM series WHERE series='damas_notif_prod' AND date_ro=? AND isp=?").get(date, isp); if (r) tsMs = Date.parse(r.ts_utc); } catch { /* ignore */ }
+  const sol = one('ws_fc_da_solar');
+  // CONS, user-spec architecture: fixed Notif cons + curve + realised-cons correction (fallback: DAMAS fc + gap)
+  let fcstCons = null;
+  const cm2 = consCurveModel();
+  const tempT = tsMs !== null ? (wxTempMap().get(new Date(tsMs).toISOString().slice(0, 13)) ?? null) : null;
+  if (cm2 && tsMs !== null) { const ncT = one('damas_notif_cons'); const g2 = consAnomGap(cm2); const e2 = ncT != null ? pdExpect(cm2, isp, sol, isWeDay(date), tempT) : null; if (ncT != null && g2 !== null && e2 !== null) fcstCons = ncT + e2 + pdGapAt(g2, tsMs); }
+  if (fcstCons === null) {
+    const cfT = one('damas_cons_fc');
+    if (cfT != null) {
+      try {
+        const g = db.prepare(`SELECT AVG(rc.value*4 - cf.value) g, COUNT(*) n
+          FROM (SELECT date_ro, isp, value FROM series WHERE series='damas_consumption' AND value IS NOT NULL ORDER BY date_ro DESC, isp DESC LIMIT 4) rc
+          JOIN series cf ON cf.series='damas_cons_fc' AND cf.date_ro=rc.date_ro AND cf.isp=rc.isp`).get();
+        if (g && g.n === 4) fcstCons = cfT + g.g;
+      } catch { /* ignore */ }
+    }
+  }
+  // sched leg (recorded for live comparison only — not the forecast)
+  let nxb = null; try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(date, isp); if (r) nxb = r.commercial; } catch { /* ignore */ }
+  if (nxb != null) nxb = Math.max(-XB_PHYS, Math.min(XB_PHYS, nxb)); // physical-capacity clip (same as the page)
+  const sched = fcstCons != null && nxb != null ? fcstCons + nxb : null;
+  // PROD, user-spec architecture: fixed Notif prod + curve + realised-prod correction
+  let curver = null;
+  const npT = one('damas_notif_prod');
+  if (npT != null && tsMs !== null) {
+    const gap = prodAnomGap(m); const e = pdExpect(m, isp, sol, isWeDay(date), tempT);
+    if (gap !== null && e !== null) curver = npT + e + pdGapAt(gap, tsMs);
+  }
+  const fcst = curver ?? sched; // user-spec: curve route IS the forecast (sched = fallback only); both legs still recorded
+  const xb = fcst !== null && fcstCons !== null ? fcst - fcstCons : null; // pure-physical Real X-B estimate (matches the page)
+  return fcst === null ? null : { fcst, sched, curver, xb, cons: fcstCons };
+}
+function lockDueProd() {
+  const ni = roDateIsp(new Date());
+  const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
+  const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN; // same gate as the sign lock
+  const has = db.prepare('SELECT 1 FROM prod_lock WHERE date_ro=? AND isp=?');
+  const ins = db.prepare('INSERT OR IGNORE INTO prod_lock(date_ro,isp,fcst,sched,curver,xb,cons,locked_at) VALUES (?,?,?,?,?,?,?,?)');
+  for (const { isp, ts } of dayTimestamps(ni.date)) {
+    const Tms = new Date(ts).getTime();
+    if (Tms >= gateMs || Tms < gateMs - 15 * signModel.MIN) continue; // lock ONLY the interval that JUST crossed the gate
+    if (has.get(ni.date, isp)) continue;                              // lock once
+    const b = prodBlendAt(ni.date, isp); if (!b) continue;
+    ins.run(ni.date, isp, +b.fcst.toFixed(1), b.sched === null ? null : +b.sched.toFixed(1), b.curver === null ? null : +b.curver.toFixed(1), b.xb === null ? null : +b.xb.toFixed(1), b.cons == null ? null : +b.cons.toFixed(1), new Date().toISOString());
+  }
+}
+setInterval(() => { try { lockDueProd(); } catch (e) { console.error('prod lock:', e.message); } }, 60000);
+try { lockDueProd(); } catch { /* startup */ }
+
 // ---- Predict page: trader-facing real-vs-notified view (imbalance, prod, cons, cross-border) ----
 async function predictPage(date) {
   const SEN = await liveSEN(date).catch(() => new Map());
@@ -1499,35 +1716,38 @@ async function predictPage(date) {
   };
   const predCell = (pr) => (pr === null ? ''
     : `<span style="font-style:italic;opacity:.7" title="model nowcast · 80% CI ${fmt(pr.lo)}–${fmt(pr.hi)} MW">~${fmt(pr.pt)} <small>±${Math.round((pr.hi - pr.lo) / 2)}</small></span>`);
-  // upcoming-cons predictor = LIVE nowcast: DAMAS day-ahead forecast + today's carried (real − forecast) gap
+  // upcoming-cons predictor = LIVE nowcast: DAMAS day-ahead forecast + today's carried (real − forecast) gap.
+  // VALIDATED 2026-07-03 (949 intervals, 75-min lead, tool/_predict_real4.js): ~130 MW MAE (~2%) — beat every
+  // alternative tried (notif+gap 223, blends 141); K window 2/4/8 indifferent. Same sweep for prod below.
   const fcstPredCell = (v) => (v === null ? ''
-    : `<span style="font-style:italic;opacity:.7" title="forecast consumption (DAMAS day-ahead + today's carried gap)">~${fmt(v)}</span>`);
-  // upcoming Real prod = schedule-consistent forecast = Fcst cons + commercial net X-B (so prod − cons = the schedule)
+    : `<span style="font-style:italic;opacity:.7" title="forecast consumption = Notif cons (fixed D-1 plan, keeps its planned steps) + the hourly deviation curve (solar-aware) + an intraday correction from realised consumption only (trend-projected) · ~96 MW MAE at 15-min lead, ~145 at 75-min">~${fmt(v)}</span>`);
+  // upcoming Real prod = 50/50 blend of two information-diverse routes: schedule-consistent (Fcst cons + commercial
+  // net X-B) + curve-anchored (Notif prod + solar-aware deviation curve + today's anomaly). 143→106 MW MAE (see prodCurveModel).
   const fcstProdCell = (v) => (v === null ? ''
-    : `<span style="font-style:italic;opacity:.7" title="forecast generation (Fcst cons + the cross-border schedule)">~${fmt(v)}</span>`);
+    : `<span style="font-style:italic;opacity:.7" title="forecast generation = Notif prod (fixed D-1 plan, keeps its planned steps) + the day/evening deviation curve (solar-aware) + an intraday correction from realised production only (trend-projected) · ~93 MW MAE at 15-min lead, ~130 at 75-min">~${fmt(v)}</span>`);
   // live-row generation split from the SCADA feed: solar / wind / hydro / nuclear / other (coal+gas+biomass)
   const prodMix = (prod, so, wi, hy, nu) => { if (prod == null) return '';
     const o = Math.max(0, Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0)));
     const s = (ic, v, t) => `<span title="${t}">${ic}${Math.round(v || 0)}</span>`;
     return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}<span title="other (coal/gas/biomass)">🔥${o}</span></span>`; };
-  // upcoming Real X-B = the LIVE commercial schedule (Notif X-B) — the best predictor of real net flow (~91 MW). Not differenced from noisy nowcasts.
+  // upcoming Real X-B = pure physical identity (Fcst prod − Fcst cons), ~110 MW MAE — kept physical on purpose
   const fcstXBCell = (v) => (v === null ? ''
-    : `<span style="font-style:italic;opacity:.75" title="Live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW error). Updates as intraday clears. The gap to reality = the imbalance, which only resolves at settlement. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
+    : `<span class="xbf" style="font-style:italic;opacity:.75" title="Real cross-border estimate = Fcst prod − Fcst cons (pure physical identity, ~110 MW MAE at the 75-min lead). Compare with the Notif cross border next to it — the GAP between them is the expected imbalance lean. Updates live with the prod/cons nowcasts. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
 
   // Forward imbalance is NOT forecast — it depends on how the market plays out intraday; persistence and
   // features add no usable forward skill (2yr walk-forward, tool/xb_phase1.js). Imbalance column is settled-only.
 
   const COLS = [
-    { h: 'Imbalance', u: 'MWh', help: 'Estimated system imbalance, SETTLED intervals only. S (blue) = surplus / system long → low or negative price. D (orange) = deficit / system short → high price. Blank forward on purpose: the forward imbalance depends on how the market plays out intraday — a 2yr walk-forward (tool/xb_phase1.js) showed persistence and every feature tried add no usable forward skill, so we do not forecast it.' },
+    { h: 'Imbalance', u: 'MWh', help: 'Estimated system imbalance. SETTLED intervals: the published value — S = surplus / system long → low or negative price, D = deficit / system short → high price. UPCOMING intervals (~italic, user-spec 2026-07-03): the PHYSICAL-IDENTITY lean = (Fcst Real X-B − Notif X-B)/4 [MWh] — how far predicted physics sits from the notified paper. Treat it as MAGNITUDE/pressure context: its sign at the 75-min lead is ~coin-flip (52% validated, corr 0.12 — the imbalance is by definition the residual plans cannot see), so read DIRECTION from the S/D% sign forecast beside it (77% on confident calls). Hidden together with the X-B estimate toggle.' },
     { h: 'Price', u: 'RON', help: 'Estimated imbalance price for the interval [RON/MWh].' },
-    { h: 'Real prod', u: 'MW', mix: true, help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a schedule-consistent forecast = Fcst cons + the cross-border schedule (so Real prod − Real cons = Real X-B). NOTE: an independent prod nowcast was tried but it badly mis-forecast the evening generation ramp (it can’t see the thermal/hydro ramp backing intraday exports), so the schedule-consistent version is used. Covers today + tomorrow.' },
-    { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, the BRP plan published a day ahead. NOTE: notified production sits on a higher basis than SEN metered (~+185 MW), so read Prod Δ as a TREND, not an exact shortfall; the live Real-prod nowcast corrects today’s gap.' },
+    { h: 'Real prod', u: 'MW', mix: true, help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a 50/50 BLEND of two routes: schedule-consistent (Fcst cons + the cross-border schedule) and curve-anchored (Notif prod + the hourly real−notif deviation curve — midday −700 MW solar over-scheduling, evening/night +200..450 — + today’s running anomaly). Formula (user-spec 2026-07-02): FIXED Notif prod (the D-1 plan — its planned increases/decreases carry through 1:1) + the day/evening deviation curve (solar-aware: deviation deepens ~0.30 MW per MW of solar forecast above the hourly norm; interpolated smoothly) + an intraday correction from REALISED production only (last-4-interval anomaly, trend-projected ≤2h, reading our ~1-min-fresh SEN recorder). No consumption/schedule leg in the level. ~93 MW MAE at 15-min lead, ~130 at 75-min. Covers today + tomorrow.' },
+    { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, the BRP plan published a day ahead. The 💧 marker flags a scheduled START/STOP in the DISPATCHABLE plan (Notif prod − solar/wind D-1 forecast, step ≥150 MW) — most likely hydro dispatching on the price curve (validated: hydro delivers such steps in 59% of cases; e.g. 2026-07-02 15:00 plan +529 → hydro +406). NOTE: notified production sits on a different basis than SEN metered, so read Prod Δ as a TREND; the live Real-prod nowcast corrects today’s gap.' },
     { h: 'Weather', u: '100m km/h', res: true, help: 'DEFAULT: Romania weather — sky icon (cloud) + 💨 wind speed at 100m (km/h), ensemble mean across 4 RO regions. Flip the switch to show the RES generation FORECAST instead (MW): E = ENTSO-E A69; M = my weather-model (intraday-adjusted, coloured vs E — green = I expect more, red = less). ☀️ solar / 💨 wind. Toggle is per-device, default off.' },
     { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price). Upcoming (italic) = forecast deviation = Fcst prod − Notif prod.' },
-    { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute). Upcoming intervals (~italic) show a LIVE nowcast = DAMAS day-ahead forecast (~2.6% MAPE) + today’s carried (real − forecast) gap, so it self-corrects to how the day is actually running (updates every 15s as intervals settle). Covers today + tomorrow.' },
+    { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute), plus the forecast recorded at the 75-min gate in brackets (green = within 150 MW). Upcoming intervals (~italic), user-spec formula (2026-07-02) mirroring Fcst prod: FIXED Notif cons (the D-1 plan — its steps carry through) + the hourly deviation curve (solar-aware: distributed PV depresses metered consumption) + an intraday correction from REALISED consumption only (last-4 anomaly, trend-projected ≤2h). ~96 MW MAE at 15-min lead, ~145 at 75-min. Covers today + tomorrow.' },
     { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the BRP demand plan, frozen D-1 ~22:45 RO. Kept for reference and for the Notif bal plan-balance, but less accurate than the live Real-cons nowcast.' },
     { h: 'Cons Δ', u: 'MW', help: 'Real − Notified consumption (may carry a basis offset — read the movement). Rising = demand gaining on plan → pushes the system SHORT (deficit, higher price). Upcoming (italic) = forecast deviation = Fcst cons − Notif cons.' },
-    { h: 'Real Cross border', u: 'MW', help: 'Settled: live net system balance (production − consumption) from SEN. ↑ = net export, ↓ = net import. Upcoming (italic): the live commercial cross-border schedule (= Notif X-B) — the best available estimate of real net flow (~91 MW MAE, validated; far better than differencing the prod/cons nowcasts). Updates as intraday (PI) clears. The gap between this and reality IS the imbalance, which only resolves at settlement.' },
+    { h: 'Real Cross border', u: 'MW', xbf: true, help: 'Settled: live net system balance (production − consumption) from SEN, plus the estimate recorded at the 75-min gate in brackets (green = within 150 MW) so the accuracy is checkable. ↑ = net export, ↓ = net import. Upcoming (italic): the PURE PHYSICAL estimate = Fcst prod − Fcst cons (~110 MW MAE at the 75-min lead, validated 2026-07-02). Kept physical deliberately so the GAP between this and the Notif cross border column IS the expected imbalance lean (a blended version scored 91 MW but diluted that signal). Updates live with the prod/cons nowcasts. Use the switch to show/hide the estimate + its record.' },
     { h: 'Notif Cross border', u: 'MW', help: 'Notified (commercial) cross-border — the FULL netted rollup. ↑ = export, ↓ = import. Updates intraday as PI border trades clear. Identity (holds exactly): Notif X-B = X-B D-1 + X-B PI + X-B LT.' },
     { h: 'Cross border D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
     { h: 'Cross border PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
@@ -1535,8 +1755,22 @@ async function predictPage(date) {
     { h: 'Cross border Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
     { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
   ];
-  const head = COLS.map((c) => `<th>${c.res ? '<span id="reshdr">' + c.h + '<br><small>' + c.u + '</small></span>' : c.h + '<br><small>' + c.u + '</small>'} <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span>${c.mix ? '<span class="mixtgl" onclick="toggleMix()" title="show/hide the per-source generation split (solar/wind/hydro/nuclear/other)"></span>' : ''}${c.res ? '<span class="restgl" onclick="toggleRes()" title="toggle: weather icons ⇄ RES generation forecast (ENTSO-E vs my model)"></span>' : ''}</th>`).join('');
+  const head = COLS.map((c) => `<th>${c.res ? '<span id="reshdr">' + c.h + '<br><small>' + c.u + '</small></span>' : c.h + '<br><small>' + c.u + '</small>'} <span class="help" tabindex="0">ⓘ<span class="tip">${c.help}</span></span>${c.mix ? '<span class="mixtgl" onclick="toggleMix()" title="show/hide the per-source generation split (solar/wind/hydro/nuclear/other)"></span>' : ''}${c.res ? '<span class="restgl" onclick="toggleRes()" title="toggle: weather icons ⇄ RES generation forecast (ENTSO-E vs my model)"></span>' : ''}${c.xbf ? '<span class="xbftgl" onclick="toggleXbf()" title="show/hide the forward Real X-B estimate (Fcst prod − Fcst cons) and its recorded-at-gate accuracy brackets"></span>' : ''}</th>`).join('');
 
+  // user-spec forecast models: fixed notif + deviation curves + realised-only intraday correction (prod & cons)
+  const pdModel = prodCurveModel();
+  const pdGap = pdModel ? prodAnomGap(pdModel) : null;
+  const cdModel = consCurveModel();
+  const cdGap = cdModel ? consAnomGap(cdModel) : null;
+  const isWeView = isWeDay(date); // day-type of the viewed date (weekend curves differ, esp. consumption midday)
+  const pdTemp = wxTempMap(); // hour → forecast temperature (the curve models' AC-load term)
+  let pdSolar = new Map(); // D-1 solar forecast per isp (curve beta basis + the dispatchable-plan derivation)
+  try { pdSolar = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_solar' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
+  let pdWind = new Map(); // D-1 wind forecast per isp (dispatchable-plan derivation)
+  try { pdWind = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_wind_onshore' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
+  // production + Real X-B forecasts LOCKED at the trade gate (prod_lock; mirrors the sign predictor's lock discipline)
+  let prodLock = new Map();
+  try { prodLock = new Map(db.prepare('SELECT isp, fcst, xb, cons FROM prod_lock WHERE date_ro=?').all(date).map((r) => [r.isp, { fcst: r.fcst, xb: r.xb, cons: r.cons }])); } catch { /* table may be absent */ }
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
@@ -1557,7 +1791,12 @@ async function predictPage(date) {
     const mx = isLive ? (liveProd !== null ? { solar: liveSolar, wind: liveWind, hydro: liveHydro, nuclear: liveNuclear } : null) : senMix.get(isp);
     const notifCons = g ? rnum(g.brpsConsumption) : null;
     const fcstConsBase = c ? rnum(c.grossForecastConsumption) : null; // DAMAS day-ahead forecast
-    const fcstCons = fcstConsBase !== null ? fcstConsBase + consDamasGap : null; // LIVE: DAMAS + today's carried gap
+    // USER-SPEC (2026-07-02): Fcst cons = fixed Notif cons + hourly deviation curve + realised-cons correction
+    // (mirrors Fcst prod exactly); DAMAS forecast + gap kept only as the fallback when the curve model is absent.
+    const rowTemp = pdTemp.get(new Date(ts).toISOString().slice(0, 13)) ?? null;
+    const cdExp = cdModel && notifCons !== null && cdGap !== null ? pdExpect(cdModel, isp, pdSolar.has(isp) ? pdSolar.get(isp) : null, isWeView, rowTemp) : null;
+    const fcstCons = cdExp !== null ? notifCons + cdExp + pdGapAt(cdGap, tsMs)
+      : (fcstConsBase !== null ? fcstConsBase + consDamasGap : null);
     const rxb = sen ? -sen.sold : null, nxb = notifXB(x); // SEN sold = cons−prod; −sold = net export
     // previous interval's notified values, for the warmth (interval-to-interval change) heatmap on the notif columns
     const gPrev = G.get(isp - 1);
@@ -1568,8 +1807,43 @@ async function predictPage(date) {
     // Backtest (14d): an independent prod/cons-derived X-B Δ was ~2× WORSE than this baseline (173 vs 91 MW; 3.5× at the
     // evening ramp), so the forward imbalance is NOT forecastable from prod/cons → X-B Δ is SETTLED-ONLY (realized imbalance);
     // forward imbalance is read from the Imbalance column (DAMAS persistence). Real prod fwd is schedule-consistent (prod−cons=commercial).
-    const fcstProd = fcstCons !== null && nxb !== null ? fcstCons + nxb : null;
-    const fcstXB = fcstProd !== null && fcstCons !== null ? fcstProd - fcstCons : null; // = nxb = live commercial schedule
+    // estimate input: commercial schedule clipped to physical capacity (virtual evening imports reached −3.3 GW
+    // vs an all-time realized max of −2.9 — they'd drag the prod/XB estimates beyond anything ever real)
+    const nxbEst = nxb !== null ? Math.max(-XB_PHYS, Math.min(XB_PHYS, nxb)) : null;
+    const fcstProdSched = fcstCons !== null && nxbEst !== null ? fcstCons + nxbEst : null; // route 1: schedule-consistent
+    // USER-SPEC ARCHITECTURE (2026-07-02): Fcst prod = fixed Notif prod (respects its planned steps) + the
+    // day/evening deviation curves (solar-aware, interpolated) + an intraday correction from REALISED production
+    // only (K=4 anomaly + damped trend). The cons+schedule leg was REMOVED from the level (it injected hour-boundary
+    // jumps and levels detached from the plan); measured cost vs the 40/60 blend ≈ 15-25 MW MAE (93 vs 78 @15min,
+    // 130 vs 105 @75min — tool/_prod_fc_lab3.js). Both legs still recorded in prod_lock for live comparison.
+    const pdExp = pdModel && notifProd !== null && pdGap !== null ? pdExpect(pdModel, isp, pdSolar.has(isp) ? pdSolar.get(isp) : null, isWeView, rowTemp) : null;
+    const fcstProdCurve = pdExp !== null ? notifProd + pdExp + pdGapAt(pdGap, tsMs) : null;
+    // ⚡ derived hydro start/stop marker: step ≥150 MW in the DISPATCHABLE plan (Notif prod − solar/wind D-1 fcst).
+    // Validated 2026-07-03 (tool/_hydro_starts.js, n=110): hydro delivers ≥30% of such steps, right sign, in 59% of
+    // cases (naive notif steps only 23% — solar ramps polluted them). Archetype: 2026-07-02 15:00 disp +529 → hydro +406.
+    const dispV = notifProd !== null && pdSolar.has(isp) && pdWind.has(isp) ? notifProd - pdSolar.get(isp) - pdWind.get(isp) : null;
+    const dispP = prevNotifProd !== null && pdSolar.has(isp - 1) && pdWind.has(isp - 1) ? prevNotifProd - pdSolar.get(isp - 1) - pdWind.get(isp - 1) : null;
+    const dispStep = dispV !== null && dispP !== null ? dispV - dispP : null;
+    const hydroMark = dispStep !== null && Math.abs(dispStep) >= 150
+      ? ` <span style="white-space:nowrap" title="scheduled ${dispStep > 0 ? 'START' : 'STOP'} in the dispatchable plan (Notif prod − solar/wind D-1 forecast): ${dispStep > 0 ? '+' : ''}${Math.round(dispStep)} MW — most likely hydro (delivers such steps in 59% of validated cases; e.g. 2026-07-02 15:00: plan +529 → hydro +406)">💧<small class="${dispStep > 0 ? 'pos' : 'neg'}">${dispStep > 0 ? '+' : ''}${Math.round(dispStep)}</small></span>`
+      : '';
+    const fcstProd = fcstProdCurve ?? fcstProdSched; // curve architecture; schedule leg only as a fallback when the curve is unavailable
+    // forward Real X-B = the PURE PHYSICAL identity: Fcst prod − Fcst cons (user 2026-07-02: keep it physical so
+    // the gap vs the Notif X-B column IS the expected imbalance lean, undiluted). Validated ~110 MW MAE @75min
+    // (schedule alone 104, blend 91 — tool/_xb_est_check.js); semantic consistency chosen over the 19 MW.
+    const fcstXB = fcstProd !== null && fcstCons !== null ? fcstProd - fcstCons : null;
+    // Real X-B gradient tint (user 2026-07-03): green = LESS import than notified (surplus lean), red = MORE
+    // (deficit lean); opacity ∝ |gap| (full at ~500 MW, dead zone <20). Settled rows use the realized gap (.xbtS),
+    // forward rows the estimate's gap (.xbtF — hides with the X-B toggle). Live row keeps its own coloring.
+    const xbTdAttr = (() => {
+      if (isLive) return liveAvg !== null && nxb !== null && liveAvg !== nxb ? ` style="background:${liveAvg > nxb ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : '';
+      const xr2 = savedAvg.has(isp) ? savedAvg.get(isp) : rxb;
+      const base = xr2 !== null ? xr2 : fcstXB;
+      if (base === null || nxb === null) return '';
+      const gap = base - nxb;
+      if (Math.abs(gap) < 20) return '';
+      return ` class="${xr2 !== null ? 'xbtS' : 'xbtF'}" style="--xbt:rgba(${gap > 0 ? '31,158,87' : '217,58,48'},${Math.min(0.5, Math.abs(gap) / 500 * 0.5).toFixed(2)})" title="${xr2 !== null ? 'realized' : 'estimated'} vs notified: ${gap > 0 ? 'LESS import / more export than the paper (surplus lean)' : 'MORE import / less export than the paper (deficit lean)'} by ${Math.round(Math.abs(gap))} MW"`;
+    })();
     const xbDeltaVal = rxb !== null && nxb !== null ? rxb - nxb : null; // realized imbalance only; null (blank) forward
     // realized surplus/deficit from the SCADA time-weighted interval AVERAGE (vs notif) — verified more accurate than
     // the SENGrafic snapshot (MAE 81 vs 94 MW, S/D call +4..8pt, vs ENTSO-E settled flows). Preferred when available.
@@ -1582,18 +1856,32 @@ async function predictPage(date) {
     // intraday trade-gate state for this interval (see gate setup above)
     const tState = tsMs < curIspStartMs ? 'past' : (tsMs < gateMs ? 'locked' : 'open');
     const gateBoundary = nowInfo.date === date && tsMs >= gateMs && tsMs - 900000 < gateMs; // first tradeable interval today
+    // Real prod cell: forecast stays LIVE for every upcoming interval right up to the live one (user 2026-07-03:
+    // an updating forecast is better trading info than a frozen one). prod_lock still snapshots at the 75-min gate
+    // in the background purely for SCORING — settled rows show real + that recorded forecast (green/red bracket).
+    const plv = prodLock.get(isp);
+    const prodCellC = dispProd !== null
+      ? fmt(dispProd) + (plv != null && plv.fcst != null ? ` <small class="${Math.abs(dispProd - plv.fcst) <= 150 ? 'fc-ok' : 'fc-bad'}" title="production forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.fcst)})</small>` : '')
+      : fcstProdCell(fcstProd);
     const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}">
       <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">▸</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
-      <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` : ''}${(() => {
+      <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` : (() => {
+        // forward imbalance value = the PHYSICAL-IDENTITY lean (user-spec 2026-07-03): (Fcst Real X-B − Notif X-B)/4 MWh.
+        // Honest caveat baked into the tooltip: at the 75-min lead this lean's SIGN is ~coin-flip (52% validated,
+        // corr 0.12 vs realized) — it's a MAGNITUDE/pressure read; the calibrated sign call stays the S/D% badge.
+        if (fcstXB === null || nxb === null) return '';
+        const lean = (fcstXB - nxb) / 4;
+        return `<span class="xbf" style="font-style:italic;opacity:.7" title="expected imbalance lean = (Fcst Real X-B − Notif X-B)/4 [MWh] — how far predicted physics sits from the paper. Pressure/magnitude context; its sign at the 75-min lead is ~coin-flip (52% validated), so read direction from the S/D% forecast beside it.">${dirIcon(lean > 0)} ~${fmt(Math.abs(lean))}</span>`;
+      })()}${(() => {
         if (nowInfo.date === date && tsMs >= gateMs && isp >= winFrom && isp <= winTo) return `<span class="fc-imb fc-r" data-fc="${isp}" title="live forecast (updates every 10s while tradeable — incl. the current tradeable interval)">·</span>`; // tradeable (start ≥ gate, incl. the gate row) → live
         const lk = signLock.get(isp);
         if (lk && isp >= winFrom && isp <= winTo) return `<span class="fc-lock fc-r fc-${lk.sign === 'S' ? 's' : 'd'}" title="forecast LOCKED at gate-close (untradeable) — recorded ${lk.conf}% ${lk.sign === 'S' ? 'surplus' : 'deficit'}">${lk.sign} ${lk.conf}%</span>`; // untradeable/settled → locked
         return '';
       })()}</td>
       <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td>
-      <td data-rprod="${isp}">${dispProd !== null ? fmt(dispProd) : fcstProdCell(fcstProd)}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)))}</span></td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
-      <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
-      <td data-rxb="${isp}"${isLive && liveAvg !== null && nxb !== null && liveAvg !== nxb ? ` style="background:${liveAvg > nxb ? 'var(--tint-pos-strong)' : 'var(--tint-neg-strong)'}!important"` : ''}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (savedAvg.has(isp) ? arrow(savedAvg.get(isp)) : (rxb !== null ? arrow(rxb) : ''))}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
+      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)))}</span></td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
+      <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) + (plv != null && plv.cons != null ? ` <small class="${Math.abs(dispCons - plv.cons) <= 150 ? 'fc-ok' : 'fc-bad'}" title="consumption forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.cons)})</small>` : '') : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
+      <td data-rxb="${isp}"${xbTdAttr}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (() => { const xr = savedAvg.has(isp) ? savedAvg.get(isp) : rxb; if (xr === null) return fcstXBCell(fcstXB); return arrow(xr) + (plv && plv.xb != null ? ` <small class="xbf ${Math.abs(xr - plv.xb) <= 150 ? 'fc-ok' : 'fc-bad'}" title="Real X-B estimate as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${arrow(plv.xb)})</small>` : ''); })()}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
     // the CURRENT TRADE row (gate = first tradeable, ~75 min ahead) is a 3-deep block: row 1 = today (above, as is),
@@ -1668,14 +1956,18 @@ ${body}</table></div>
       var notif=(nc&&nc.dataset.v!=='')?+nc.dataset.v:(j.notifPi!=null?j.notifPi:j.notifxb);
       if(c){
         c.title='Sold schimb (Transelectrica)='+Math.round(j.sold)+' MW (minus=export→↑, plus=import→↓) · Notif X-B='+(notif!=null?Math.round(notif):'?')+' MW · '+new Date().toLocaleTimeString();
-        c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'');
+        var brx=keepBr(c);
+        c.innerHTML=ar(j.realxb)+(j.avg!=null?' <span style="font-size:11px;font-weight:600" title="interval average of '+j.navg+' polled readings">| '+ar(j.avg)+'</span>':'')+brx;
         if(notif!=null&&j.avg!=null){c.style.removeProperty('background');if(j.avg!==notif)c.style.setProperty('background',j.avg>notif?'var(--tint-pos-strong)':'var(--tint-neg-strong)','important');} // colour by the interval AVERAGE vs live Notif (matches the live Δ sign)
         if(c.animate)c.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'}); // gentle blink on each refresh
       }
-      // live Real prod / Real cons for the current interval = freshest Transelectrica SCADA reading
+      // live Real prod / Real cons for the current interval = freshest Transelectrica SCADA reading.
+      // keepBr: PRESERVE the recorded-at-gate forecast bracket (small.fc-ok/.fc-bad) — overwriting without it
+      // made the brackets flicker against the 15s full refresh (user-reported 2026-07-03).
+      function keepBr(el){var b=el&&el.querySelector('small.fc-ok,small.fc-bad');return b?' '+b.outerHTML:'';}
       function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+'<span title="other (coal/gas/biomass)">🔥'+o+'</span></span>';}
-      var pc=document.querySelector('td[data-rprod="'+j.soldIsp+'"]'); if(pc&&j.prod!=null){pc.innerHTML=Math.round(j.prod).toLocaleString('en-US')+mixHtml(j);if(pc.animate)pc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
-      var cc=document.querySelector('td[data-rcons="'+j.soldIsp+'"]'); if(cc&&j.cons!=null){cc.textContent=Math.round(j.cons).toLocaleString('en-US');if(cc.animate)cc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      var pc=document.querySelector('td[data-rprod="'+j.soldIsp+'"]'); if(pc&&j.prod!=null){var brp=keepBr(pc);pc.innerHTML=Math.round(j.prod).toLocaleString('en-US')+brp+mixHtml(j);if(pc.animate)pc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
+      var cc=document.querySelector('td[data-rcons="'+j.soldIsp+'"]'); if(cc&&j.cons!=null){var brc=keepBr(cc);cc.innerHTML=Math.round(j.cons).toLocaleString('en-US')+brc;if(cc.animate)cc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       // Cross border Δ (live) for the current interval = interval-AVERAGE real X-B (right of the |) − LIVE Notif cross border
       var dc=document.querySelector('td[data-xbd="'+j.soldIsp+'"]');
       if(dc&&j.avg!=null&&notif!=null){var d=Math.round(j.avg-notif);dc.innerHTML='<span class="'+(d>=0?'pos':'neg')+'" title="live: interval AVERAGE real X-B (right of the |) − live Notif cross border">'+(d>=0?'+':'')+d+'</span>';if(dc.animate)dc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
