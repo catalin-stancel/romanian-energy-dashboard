@@ -29,10 +29,33 @@ const num = (v) => { const n = Number(v); return v !== null && v !== undefined &
 // SCADA timestamp "YY/M/DD HH:MM:SS" (RO wall-clock) → "naive" ms (Europe/Bucharest wall-clock treated as UTC).
 // Used to bucket readings into intervals by their TRUE data time (not our ~1-min-lagged record time) and to
 // time-weight the interval average. Shares the clock with server.js roWallMs()/tStart, so the tz offset cancels.
-const naiveMs = (s) => { const m = /(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+)/.exec(s || ''); return m ? Date.UTC(2000 + +m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null; };
+// The feed OCCASIONALLY flips to "D/M/YY" (seen 2026-06-24..07-03: "30/6/26 …" = 30 June '26, misread as 2030
+// → future ts_ms poisoned every MAX/ORDER BY ts_ms consumer). Disambiguate by proximity to the current
+// Bucharest wall clock: accept whichever reading lands within ±2 days of now; reject both otherwise.
+const naiveNow = () => {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Bucharest', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(new Date());
+  const g = {}; for (const x of p) g[x.type] = +x.value;
+  return Date.UTC(g.year, g.month - 1, g.day, g.hour === 24 ? 0 : g.hour, g.minute, g.second);
+};
+const naiveMs = (s) => {
+  const m = /(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+)/.exec(s || '');
+  if (!m) return null;
+  const now = naiveNow(), TOL = 2 * 86400000;
+  const yfirst = Date.UTC(2000 + +m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  if (Math.abs(yfirst - now) <= TOL) return yfirst;
+  const dfirst = Date.UTC(2000 + +m[3], +m[2] - 1, +m[1], +m[4], +m[5], +m[6]);
+  if (Math.abs(dfirst - now) <= TOL) return dfirst;
+  return null;
+};
 // the RO-day interval (date YYYY-MM-DD + isp 1..96) a SCADA timestamp belongs to — position in the local day,
 // no tz math. Used so the live Real-X-B value lands in the interval its SCADA time falls in, not the wall-clock one.
-const tsInterval = (s) => { const m = /(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+)/.exec(s || ''); if (!m) return null; return { date: (2000 + +m[1]) + '-' + String(+m[2]).padStart(2, '0') + '-' + String(+m[3]).padStart(2, '0'), isp: Math.floor((+m[4] * 60 + +m[5]) / 15) + 1 }; };
+// Built on the SAME disambiguated parse (naive ms are Bucharest wall-clock treated as UTC, so UTC getters = local parts).
+const tsInterval = (s) => {
+  const t = naiveMs(s);
+  if (t == null) return null;
+  const d = new Date(t);
+  return { date: d.toISOString().slice(0, 10), isp: Math.floor((d.getUTCHours() * 60 + d.getUTCMinutes()) / 15) + 1 };
+};
 
 async function fetchSenFilter() {
   const r = await fetch(URL + '?_=' + Date.now(), { headers: HDRS });
@@ -88,7 +111,7 @@ function intervalAvg(db, dateRo, isp) {
   // End the integration at the latest SCADA timestamp ("scada now"), NOT the wall clock — so the denominator is the
   // seconds ELAPSED BY SCADA TIME (latest SCADA ts − interval start), and the last reading is never extrapolated
   // across the feed's ~1-min lag. Past intervals: scadaNow >> tFull → full 15 min. Current: up to the freshest reading.
-  let scadaNow = tStart + 1; try { const r = db.prepare('SELECT MAX(ts_ms) m FROM sen_live WHERE ts_ms IS NOT NULL').get(); if (r && r.m) scadaNow = r.m; } catch { /* ignore */ }
+  let scadaNow = tStart + 1; try { const r = db.prepare("SELECT MAX(ts_ms) m FROM sen_live WHERE ts_ms IS NOT NULL AND ABS(ts_ms - (strftime('%s',pulled_at)*1000 + 10800000)) < 86400000").get(); if (r && r.m) scadaNow = r.m; } catch { /* ignore */ }
   const tEnd = Math.min(tFull, Math.max(scadaNow, tStart + 1)); // completed → full 15min; current → scada-elapsed
   let inWin, carry;
   try {

@@ -19,6 +19,8 @@ const JOBS = [
   { name: 'train_models', script: 'train_models.js', args: [], everyMin: 30 },
   // external "RO Signal Override" desk → ext_signals + auto-fill positions (no-op unless SIGNAL_URL env is set)
   { name: 'signals', script: 'pull_signals.js', args: [], everyMin: 15 },
+  // JAO Core border capacities (HU flow-based max + BG ATC) — denominators for the Predict border-capacity readout
+  { name: 'jao', script: 'pull_jao.js', args: [], everyMin: 60 },
   // daily / weekly (UTC clock)
   { name: 'oferte', script: 'update_oferte.js', args: [], dailyUtc: '03:30', nodeArgs: ['--max-old-space-size=1536'] },
   { name: 'train', script: 'train.js', args: [], weeklyUtc: { dow: 0, hour: 4 }, nodeArgs: ['--max-old-space-size=2048'] },

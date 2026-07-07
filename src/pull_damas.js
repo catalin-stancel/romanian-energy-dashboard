@@ -26,6 +26,10 @@ const REPORTS = [
     imbalanceNettingImport: 'damas_netting_import', imbalanceNettingExport: 'damas_netting_export',
   } },
   { cmd: 'estimatedPowerSystemImbalance', gate: 'estimatedSystemImbalance', fields: {
+    // ALSO write the system imbalance from THIS report: it publishes ~2 intervals (30-60 min) EARLIER than
+    // estimatedImbalancePrices and the values are bit-identical on overlap (verified 141/141 intervals,
+    // 2026-07-06/07) — without this the page's State column stalls whenever the prices report lags.
+    estimatedSystemImbalance: 'damas_est_sys_imbalance',
     estimatedUnintendedDeviationINArea: 'damas_dev_in', estimatedUnintendedDeviationOUTArea: 'damas_dev_out',
     contractedBMVolumeUp: 'damas_contr_up', contractedBMVolumeDown: 'damas_contr_down',
     activatedReserve: 'damas_act_reserve',

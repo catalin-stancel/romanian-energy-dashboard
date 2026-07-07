@@ -388,6 +388,8 @@ const NAV = (active, date, refreshSec, extras) => `
     localStorage.setItem('showPreds',off?'0':'1');setPredLabel();}
   // show/hide the per-source generation split (Real prod header switch); persisted per device
   function toggleMix(){var off=document.documentElement.classList.toggle('mix-off');localStorage.setItem('showMix',off?'0':'1');}
+  // show/hide the per-interval border capacity-used readout (Int header switch); default hidden
+  function toggleXbu(){var on=document.documentElement.classList.toggle('xbu-on');localStorage.setItem('showXbu',on?'1':'0');}
   function toggleXbf(){var off=document.documentElement.classList.toggle('xbf-off');localStorage.setItem('showXbf',off?'0':'1');}
   // RES fcst column: weather icons (default) ⇄ RES generation forecast; persisted per device
   function setResLabel(){var h=document.getElementById('reshdr');if(h)h.innerHTML=document.documentElement.classList.contains('res-on')?'RES fcst<br><small>MW</small>':'Weather<br><small>100m km/h</small>';}
@@ -422,7 +424,7 @@ const NAV = (active, date, refreshSec, extras) => `
 // YellowGrid Design System (data/design/colors_and_type.css) — brand yellow as accent over a
 // themeable base. DARK is the default theme; html[data-theme='light'] restores the original
 // light palette. The inline script runs before CSS paint so there is no theme flash.
-const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off');if((localStorage.getItem('showMix')||'0')!=='1')document.documentElement.classList.add('mix-off');if(localStorage.getItem('showRes')==='1')document.documentElement.classList.add('res-on');if(localStorage.getItem('showXbf')==='0')document.documentElement.classList.add('xbf-off')</script>
+const STYLE = `<script>document.documentElement.dataset.theme=localStorage.getItem('theme')||'dark';if((localStorage.getItem('showPreds')||'0')!=='1')document.documentElement.classList.add('preds-off');if((localStorage.getItem('showMix')||'0')!=='1')document.documentElement.classList.add('mix-off');if(localStorage.getItem('showRes')==='1')document.documentElement.classList.add('res-on');if(localStorage.getItem('showXbf')==='0')document.documentElement.classList.add('xbf-off');if(localStorage.getItem('showXbu')==='1')document.documentElement.classList.add('xbu-on')</script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
@@ -578,6 +580,17 @@ html.mix-off .mixtgl::after{left:1px}
 html.xbf-off .xbftgl{background:var(--border-2)}
 html.xbf-off .xbftgl::after{left:1px}
 html.xbf-off .xbf{display:none!important}
+/* HU-border congestion row tints (before the xbt rules so the X-B gradient cells keep their own background):
+   violet = import-congested (RO detached ABOVE the EU price), amber = export-congested (surplus trapped below). */
+tr.huimp td{background-color:rgba(147,51,234,0.12)}
+tr.huexp td{background-color:rgba(210,105,30,0.13)}
+.xbutil{display:none;opacity:.7;font-size:10px;white-space:nowrap} /* per-row border capacity-used readout (H imp/exp · B imp/exp) — hidden by default, Int header switch */
+html.xbu-on .xbutil{display:inline}
+/* mini toggle switch in the Int header (same pattern as the Real prod mix switch, but default OFF) */
+.xbutgl{cursor:pointer;display:inline-block;width:22px;height:12px;border-radius:7px;background:var(--border-2);position:relative;vertical-align:middle;margin-left:5px;transition:background .15s}
+.xbutgl::after{content:'';position:absolute;top:1px;left:1px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .15s}
+html.xbu-on .xbutgl{background:var(--ic-s)}
+html.xbu-on .xbutgl::after{left:11px}
 /* Real X-B gradient: green = less import than notified (surplus lean), red = more (deficit). The tint composites
    over a FIXED base (not the zebra stripe) so the column gradient FLOWS smoothly row to row. */
 tr td.xbtS,tr td.xbtF{background-color:var(--bg-surface);background-image:linear-gradient(var(--xbt),var(--xbt))}
@@ -1555,6 +1568,17 @@ function lockDueProd() {
 setInterval(() => { try { lockDueProd(); } catch (e) { console.error('prod lock:', e.message); } }, 60000);
 try { lockDueProd(); } catch { /* startup */ }
 
+// HU-border empirical capacity envelope: rolling 60-day p99.5 of the total commercial exchange per direction.
+// (The HU border is Core FLOW-BASED — no official per-border NTC exists; A61 is empty there by design. BG has
+// official daily NTC via ntc_BG_RO/ntc_RO_BG.) Cached 10 min.
+let _huEnvCache = { at: 0, env: null };
+function huEnv() {
+  if (Date.now() - _huEnvCache.at < 600000) return _huEnvCache.env;
+  const q = (s) => { try { const v = db.prepare("SELECT value FROM series WHERE series=? AND date_ro>=date('now','-60 day') AND value IS NOT NULL ORDER BY value").all(s).map((r) => r.value); return v.length ? v[Math.floor(v.length * 0.995)] : null; } catch { return null; } };
+  _huEnvCache = { at: Date.now(), env: { imp: q('sched_HU_RO'), exp: q('sched_RO_HU') } };
+  return _huEnvCache.env;
+}
+
 // ---- Predict page: trader-facing real-vs-notified view (imbalance, prod, cons, cross-border) ----
 async function predictPage(date) {
   const SEN = await liveSEN(date).catch(() => new Map());
@@ -1603,7 +1627,7 @@ async function predictPage(date) {
   };
 
   let lastRealIsp = null;
-  for (const { isp, ts } of dayTimestamps(date)) { const r = P.get(isp); if (new Date(ts).getTime() + 900000 <= nowMs && r && rnum(r.estimatedSystemImbalance) !== null) lastRealIsp = isp; }
+  for (const { isp, ts } of dayTimestamps(date)) { const r = P.get(isp), e2 = E.get(isp); if (new Date(ts).getTime() + 900000 <= nowMs && (rnum(r && r.estimatedSystemImbalance) !== null || rnum(e2 && e2.estimatedSystemImbalance) !== null)) lastRealIsp = isp; }
   const xbAgg = xbDeltaAgg(date); // recorded X-B Δ snapshots → interval-average + drift
   const xbChg = xbPiChange(date); // last intraday change to Notif cross-border per interval (the PI trade: sold/bought)
   let xbHist = new Set(); // intervals that have recorded PI-trade frames → show the ⓘ history popup icon
@@ -1770,6 +1794,29 @@ async function predictPage(date) {
   try { pdSolar = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_solar' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
   let pdWind = new Map(); // D-1 wind forecast per isp (dispatchable-plan derivation)
   try { pdWind = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_wind_onshore' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
+  // border capacity utilization: numerator = total commercial exchange (sched_*), denominator = official NTC
+  // for BG / rolling 60-day max for HU (flow-based). NTC is hourly → per-isp lookup falls back within the hour.
+  const utilM = (() => { const g = (s) => new Map(db.prepare("SELECT isp, value FROM series WHERE series=? AND date_ro=? AND value IS NOT NULL").all(s, date).map((r) => [r.isp, r.value]));
+    return { hi: g('sched_HU_RO'), he: g('sched_RO_HU'), bi: g('sched_BG_RO'), be: g('sched_RO_BG'), ni: g('ntc_BG_RO'), ne: g('ntc_RO_BG'), jmi: g('jao_max_HU_RO'), jme: g('jao_max_RO_HU') }; })();
+  const huEnvV = huEnv(); // fallback only, when the JAO official max is absent for the date
+  const hourVal = (m, isp) => { for (let k = 0; k <= 3; k++) { if (m.has(isp - k)) return m.get(isp - k); } return null; };
+  const utilPct = (num, den) => (num != null && den != null && den > 0 ? Math.round(num / den * 100) : null);
+  // HU denominators = OFFICIAL flow-based max bilateral exchange (JAO Core maxExchanges, hourly); BG = official NTC (A61)
+  const utilAt = (isp) => ({
+    hi: utilPct(utilM.hi.get(isp), hourVal(utilM.jmi, isp) ?? (huEnvV && huEnvV.imp)),
+    he: utilPct(utilM.he.get(isp), hourVal(utilM.jme, isp) ?? (huEnvV && huEnvV.exp)),
+    bi: utilPct(utilM.bi.get(isp), hourVal(utilM.ni, isp)), be: utilPct(utilM.be.get(isp), hourVal(utilM.ne, isp)),
+  });
+  // per-interval HU-border congestion state from the RO−HU DA spread (row tints; ±5 EUR threshold)
+  const huSpread = new Map();
+  try {
+    const huP = new Map(db.prepare("SELECT isp, value FROM series WHERE series='da_price_hu' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value]));
+    for (const r of db.prepare("SELECT isp, value FROM series WHERE series='da_price' AND date_ro=? AND value IS NOT NULL").all(date)) {
+      const hv = huP.get(r.isp); if (hv == null) continue;
+      const sp = r.value - hv;
+      if (sp >= 5) huSpread.set(r.isp, { cls: 'huimp', sp }); else if (sp <= -5) huSpread.set(r.isp, { cls: 'huexp', sp });
+    }
+  } catch { /* series may be absent */ }
   // production + Real X-B forecasts LOCKED at the trade gate (prod_lock; mirrors the sign predictor's lock discipline)
   let prodLock = new Map();
   try { prodLock = new Map(db.prepare('SELECT isp, fcst, xb, cons, lean FROM prod_lock WHERE date_ro=?').all(date).map((r) => [r.isp, { fcst: r.fcst, xb: r.xb, cons: r.cons, lean: r.lean }])); } catch { /* table may be absent */ }
@@ -1778,7 +1825,10 @@ async function predictPage(date) {
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
     const isLive = isp === liveIsp; // the interval the live Transelectrica reading belongs to (by SCADA time)
     const p = P.get(isp), g = G.get(isp), c = C.get(isp), x = X.get(isp), e = E.get(isp);
-    const imb = p ? rnum(p.estimatedSystemImbalance) : null;
+    // imbalance: prices report first, else the estimatedPowerSystemImbalance report — SAME value (bit-identical
+    // on overlap, verified 2026-07-07) but published ~2 intervals earlier; without the fallback the State/Imbalance
+    // columns stall whenever the prices report lags (user-reported).
+    const imb = (p ? rnum(p.estimatedSystemImbalance) : null) ?? (e ? rnum(e.estimatedSystemImbalance) : null);
     const price = p ? rnum(p.estimatedPricePositiveImbalance) : null;
     // price not yet published by DAMAS → compute it from the early-publishing balancing-energy data
     const epImb = (price !== null || !p) ? null : earlyPrice(imb, rnum(p.sumQup), rnum(p.sumQdn), rnum(p.sumQupPup), rnum(p.sumQdownPdn));
@@ -1865,8 +1915,19 @@ async function predictPage(date) {
     const prodCellC = dispProd !== null
       ? fmt(dispProd) + (plv != null && plv.fcst != null ? ` <small class="${Math.abs(dispProd - plv.fcst) <= 150 ? 'fc-ok' : 'fc-bad'}" title="production forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.fcst)})</small>` : '')
       : fcstProdCell(fcstProd);
-    const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}">
-      <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">▸</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
+    const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}${huSpread.has(isp) ? ' ' + huSpread.get(isp).cls : ''}">
+      <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">▸</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}${huSpread.has(isp) ? (() => {
+        const hs = huSpread.get(isp), u = utilAt(isp);
+        const pct = hs.cls === 'huimp' ? u.hi : u.he;
+        const tip = `HU border ${hs.cls === 'huimp' ? `IMPORT-congested — RO detached ${Math.round(hs.sp)} EUR/MWh ABOVE the EU price (scarcity)` : `EXPORT-congested — surplus trapped, RO ${Math.round(-hs.sp)} EUR/MWh BELOW the EU price`}${pct != null ? ` · ${hs.cls === 'huimp' ? 'import' : 'export'} capacity used ${pct}% (vs the official flow-based max (JAO))` : ''}`;
+        return ` <span title="${tip}">${hs.cls === 'huimp' ? '🔌' : '🚧'}${pct != null ? `<small>${pct}%</small>` : ''}</span>`;
+      })() : ''}${(() => {
+        // per-row border capacity readout (user 2026-07-07): H imp/exp · B imp/exp, every interval
+        const u = utilAt(isp);
+        if (u.hi == null && u.he == null && u.bi == null && u.be == null) return '';
+        const f = (v) => (v == null ? '–' : `<span${v >= 90 ? ' style="color:var(--neg,#d93a30);font-weight:700"' : v >= 75 ? ' style="color:#d2691e;font-weight:600"' : ''}>${v}</span>`);
+        return ` <small class="xbutil" title="border capacity used this interval — H = Hungary import/export (vs the OFFICIAL flow-based max bilateral exchange, JAO Core, hourly), B = Bulgaria import/export (vs official NTC). Amber ≥75%, red ≥90%. Readings >100% = the commercial paper exceeds the official net max (netted/virtual schedules — the physical flow cannot).">H${f(u.hi)}/${f(u.he)} B${f(u.bi)}/${f(u.be)}</small>`;
+      })()}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
       <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` + (plv != null && plv.lean != null ? ` <small class="xbf ${Math.sign(plv.lean) === Math.sign(imb) ? 'fc-ok' : 'fc-bad'}" title="imbalance lean as recorded at the 75-min gate, vs realized (green = sign matched)">(${plv.lean > 0 ? 'S' : 'D'} ${fmt(Math.abs(plv.lean))})</small>` : '') : (() => {
         // forward imbalance value = the PHYSICAL-IDENTITY lean (user-spec 2026-07-03): (Fcst Real X-B − Notif X-B)/4 MWh.
         // Honest caveat baked into the tooltip: at the 75-min lead this lean's SIGN is ~coin-flip (52% validated,
@@ -1888,13 +1949,46 @@ async function predictPage(date) {
     return _row;
   }).join('\n');
 
+  // 🔌 HU-link congestion meter — EXACT: coupled markets equalize prices unless the border binds, so any hourly
+  // RO−HU DA spread ⟺ congestion. + = import-congested (scarcity, RO detaches ABOVE the EU price);
+  // − = export-congested (surplus trapped, RO detaches BELOW — midday crash risk for the solar position).
+  const huBar = (() => {
+    try {
+      const roP = db.prepare("SELECT isp, value FROM series WHERE series='da_price' AND date_ro=? AND value IS NOT NULL").all(date);
+      const huP = new Map(db.prepare("SELECT isp, value FROM series WHERE series='da_price_hu' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value]));
+      if (!roP.length || !huP.size) return '';
+      const byH = {};
+      for (const r of roP) { const hv = huP.get(r.isp); if (hv == null) continue; const h = Math.floor((((r.isp - 1) * 15 - 60) + 1440) % 1440 / 60); (byH[h] = byH[h] || []).push(r.value - hv); }
+      const hours = Object.keys(byH).map(Number).sort((a, b) => a - b);
+      if (!hours.length) return '';
+      const segs = [];
+      let cur = null;
+      for (const h of hours) {
+        const sp = byH[h].reduce((a, b) => a + b, 0) / byH[h].length;
+        const st = sp >= 5 ? 'imp' : sp <= -5 ? 'exp' : 'open';
+        if (cur && cur.st === st && h === cur.to + 1) { cur.to = h; if (Math.abs(sp) > Math.abs(cur.peak)) cur.peak = sp; }
+        else { cur = { st, from: h, to: h, peak: sp }; segs.push(cur); }
+      }
+      const cong = segs.filter((s) => s.st !== 'open');
+      const lbl = (s) => `${String(s.from).padStart(2, '0')}–${String(s.to + 1).padStart(2, '0')}h <b style="color:${s.st === 'imp' ? 'var(--neg,#d93a30)' : '#d2691e'}">${s.st === 'imp' ? 'IMPORT-congested — RO detached ABOVE the EU price' : 'EXPORT-congested — surplus trapped, RO below the EU price'}</b> <small>(peak ${s.peak >= 0 ? '+' : ''}${Math.round(s.peak)} EUR/MWh)</small>`;
+      const body = cong.length ? cong.map(lbl).join(' &nbsp;·&nbsp; ') : '<b class="pos">OPEN all day</b> — RO coupled to the EU price (spread ~0 every hour)';
+      // capacity utilization day peaks per border+direction (BG vs official NTC; HU vs its 60-day commercial max)
+      const peaks = { hi: 0, he: 0, bi: 0, be: 0 };
+      for (const isp of new Set([...utilM.hi.keys(), ...utilM.he.keys(), ...utilM.bi.keys(), ...utilM.be.keys()])) {
+        const u = utilAt(isp);
+        for (const k of ['hi', 'he', 'bi', 'be']) if (u[k] != null && u[k] > peaks[k]) peaks[k] = u[k];
+      }
+      const utilLine = (peaks.hi || peaks.bi) ? `<br><small style="color:var(--fg-muted)">capacity used, day peak — HU: import ${peaks.hi}% · export ${peaks.he}% <i>(vs official JAO flow-based max)</i> &nbsp;|&nbsp; BG: import ${peaks.bi}% · export ${peaks.be}% <i>(vs official NTC)</i></small>` : '';
+      return `<div id="hubar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2)"><b>🔌 HU link</b> <span class="help" tabindex="0">ⓘ<span class="tip">The exact congestion meter for Romania’s only border to the Central-European market. Coupled markets equalize prices unless the border is FULL — so any hourly RO−HU day-ahead spread means the HU border was binding. + spread = import-congested (scarcity: RO detaches ABOVE the EU price, expensive evenings). − spread = export-congested (surplus trapped: RO detaches BELOW, midday price-crash risk). Known for the whole day at ~13:00 D-1. Detached intervals are tinted in the table: VIOLET rows = import-congested, AMBER rows = export-congested; the 🔌/🚧 icons carry the capacity-used %.</span></span> ${body}${utilLine}</div>`;
+    } catch { return ''; }
+  })();
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
 ${NAV('predict', date, null, colPicker('cols-predict', [], [7, 10, 13, 15, 17]))}<div class="content">
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
-<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
+${huBar}<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="resscore" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
-<table><caption class="gatecap">${gateCaption}</caption><tr><th>Int</th><th>CET</th>${head}</tr>
+<table><caption class="gatecap">${gateCaption}</caption><tr><th>Int<span class="xbutgl" onclick="toggleXbu()" title="show/hide the per-interval border capacity used — H = Hungary imp/exp (vs JAO flow-based max), B = Bulgaria imp/exp (vs official NTC)"></span></th><th>CET</th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
   document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
@@ -2349,7 +2443,9 @@ const server = http.createServer(async (req, res) => {
       // (physical exchange vs plan) reads the settled imbalance at ~0.54 / 80% sign — import OVER plan → DEFICIT lean.
       // ~1-min fresh. Plus the latest settled imbalance as the anchor + a TURN flag when the live read disagrees with it.
       // Situational awareness + early-flip detection, NOT a 75-min forecast edge (validated: persistence still wins the anchor).
-      const recent = db.prepare('SELECT ts_ms, pulled_at, sold, plan FROM sen_live WHERE sold IS NOT NULL AND plan IS NOT NULL ORDER BY ts_ms DESC LIMIT 30').all();
+      // guard: drop rows whose ts_ms disagrees with our own record clock by >1 day — the feed occasionally flips
+      // its date format (D/M/YY vs YY/M/DD) and one misparsed FUTURE row would freeze this endpoint forever.
+      const recent = db.prepare("SELECT ts_ms, pulled_at, sold, plan FROM sen_live WHERE sold IS NOT NULL AND plan IS NOT NULL AND ts_ms IS NOT NULL AND ABS(ts_ms - (strftime('%s',pulled_at)*1000 + 10800000)) < 86400000 ORDER BY ts_ms DESC LIMIT 30").all();
       if (!recent.length) return json({ ok: false });
       const cur = recent[0], dev = cur.sold - cur.plan;       // ts_ms carries a +3h local-as-UTC offset (relative diffs ok); age uses pulled_at (true UTC)
       const older = recent.find((r) => r.ts_ms <= cur.ts_ms - 10 * 60000);

@@ -108,6 +108,17 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
       for (const [f, series] of Object.entries(FIELD)) llN += append(series, ts, ri, num(it[f]));
       const se = sen.get(ri.isp); if (se) { llN += append('sen_prod', ts, ri, se.prod); llN += append('sen_cons', ts, ri, se.cons); llN += append('sen_sold', ts, ri, se.sold); }
     }
+    // estimatedPowerSystemImbalance publishes the SAME system imbalance ~30-60 min earlier than the prices
+    // report (bit-identical on overlap) — log it too so the trajectory doesn't stall when prices lag.
+    try {
+      const pu = new URL(BASE + 'publicReport/estimatedPowerSystemImbalance');
+      pu.searchParams.set('timeInterval', JSON.stringify({ from, to }));
+      for (const it of (await (await fetch(pu)).json()).itemList || []) {
+        const ts = it.timeInterval && it.timeInterval.from; if (!ts) continue;
+        const tms = new Date(ts).getTime(); if (tms > nowMs || tms < winFrom) continue;
+        llN += append('damas_est_sys_imbalance', ts, roDateIsp(new Date(ts)), num(it.estimatedSystemImbalance));
+      }
+    } catch { /* transient — prices-report values still logged above */ }
     db.exec('COMMIT');
     console.log(`live_log +${llN} changed values`);
   } catch (e) { try { db.exec('ROLLBACK'); } catch {} console.error('live_log record failed:', e.message); }

@@ -32,6 +32,16 @@ const CATALOG = [
   { name: 'gen_fc_da',    params: { documentType: 'A71', processType: 'A01', in_Domain: RO }, chunkDays: 30 },
   { name: 'gen_actual',   params: { documentType: 'A75', processType: 'A16', in_Domain: RO }, chunkDays: 7 },
   { name: 'da_price',     params: { documentType: 'A44', 'in_Domain': RO, 'out_Domain': RO, 'contract_MarketAgreement.type': 'A01' }, chunkDays: 30 },
+  // Hungary's DA price — the RO−HU hourly spread is the EXACT congestion meter for the HU border (coupled
+  // markets equalize unless the border binds; any non-zero spread ⟺ congestion, gap = severity). EUR/MWh.
+  { name: 'da_price_hu',  params: { documentType: 'A44', 'in_Domain': '10YHU-MAVIR----U', 'out_Domain': '10YHU-MAVIR----U', 'contract_MarketAgreement.type': 'A01' }, chunkDays: 30, optional: true },
+  // Bulgaria's DA price — same congestion-meter logic for the BG border (the biggest gross-import, two-way border)
+  { name: 'da_price_bg',  params: { documentType: 'A44', 'in_Domain': '10YCA-BULGARIA-R', 'out_Domain': '10YCA-BULGARIA-R', 'contract_MarketAgreement.type': 'A01' }, chunkDays: 30, optional: true },
+  // Official day-ahead NTC for the BG border (A61 daily) — the denominator for the utilization %. Convention
+  // matches sched_: in_Domain=RO means capacity INTO RO (import). NB: the HU border is Core FLOW-BASED — A61 is
+  // empty there by design (no single per-border capacity exists); HU utilization uses a rolling empirical max.
+  { name: 'ntc_BG_RO',    params: { documentType: 'A61', 'contract_MarketAgreement.Type': 'A01', in_Domain: RO, out_Domain: '10YCA-BULGARIA-R' }, chunkDays: 30, optional: true },
+  { name: 'ntc_RO_BG',    params: { documentType: 'A61', 'contract_MarketAgreement.Type': 'A01', in_Domain: '10YCA-BULGARIA-R', out_Domain: RO }, chunkDays: 30, optional: true },
   { name: 'net_pos_da',   params: { documentType: 'A25', businessType: 'B09', 'Contract_MarketAgreement.Type': 'A01', in_Domain: RO, out_Domain: RO }, chunkDays: 30, optional: true },
 ];
 // per-border flows (A11, physical) and total scheduled exchanges (A09), both directions
