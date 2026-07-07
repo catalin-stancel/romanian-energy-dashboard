@@ -1499,6 +1499,7 @@ function consAnomGap(m) {
 try { db.exec('CREATE TABLE IF NOT EXISTS prod_lock(date_ro TEXT, isp INTEGER, fcst REAL, sched REAL, curver REAL, locked_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('prod_lock table:', e.message); }
 try { db.exec('ALTER TABLE prod_lock ADD COLUMN xb REAL'); } catch { /* exists */ } // the Real X-B estimate (fcst − fcstCons) recorded at the same gate
 try { db.exec('ALTER TABLE prod_lock ADD COLUMN cons REAL'); } catch { /* exists */ } // the Fcst cons recorded at the same gate
+try { db.exec('ALTER TABLE prod_lock ADD COLUMN lean REAL'); } catch { /* exists */ } // the imbalance lean (xb − notifXB@lock)/4 [MWh] recorded at the same gate
 // DB-only blend (same formulas the page renders; validated ~106 MW MAE @75min — see prodCurveModel)
 function prodBlendAt(date, isp) {
   const m = prodCurveModel(); if (!m) return null;
@@ -1522,8 +1523,8 @@ function prodBlendAt(date, isp) {
     }
   }
   // sched leg (recorded for live comparison only — not the forecast)
-  let nxb = null; try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(date, isp); if (r) nxb = r.commercial; } catch { /* ignore */ }
-  if (nxb != null) nxb = Math.max(-XB_PHYS, Math.min(XB_PHYS, nxb)); // physical-capacity clip (same as the page)
+  let rawNxb = null; try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(date, isp); if (r) rawNxb = r.commercial; } catch { /* ignore */ }
+  const nxb = rawNxb != null ? Math.max(-XB_PHYS, Math.min(XB_PHYS, rawNxb)) : null; // physical-capacity clip (same as the page)
   const sched = fcstCons != null && nxb != null ? fcstCons + nxb : null;
   // PROD, user-spec architecture: fixed Notif prod + curve + realised-prod correction
   let curver = null;
@@ -1534,20 +1535,21 @@ function prodBlendAt(date, isp) {
   }
   const fcst = curver ?? sched; // user-spec: curve route IS the forecast (sched = fallback only); both legs still recorded
   const xb = fcst !== null && fcstCons !== null ? fcst - fcstCons : null; // pure-physical Real X-B estimate (matches the page)
-  return fcst === null ? null : { fcst, sched, curver, xb, cons: fcstCons };
+  const lean = xb !== null && rawNxb != null ? (xb - rawNxb) / 4 : null;  // imbalance lean [MWh] vs the notified paper at lock time
+  return fcst === null ? null : { fcst, sched, curver, xb, cons: fcstCons, lean };
 }
 function lockDueProd() {
   const ni = roDateIsp(new Date());
   const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
   const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN; // same gate as the sign lock
   const has = db.prepare('SELECT 1 FROM prod_lock WHERE date_ro=? AND isp=?');
-  const ins = db.prepare('INSERT OR IGNORE INTO prod_lock(date_ro,isp,fcst,sched,curver,xb,cons,locked_at) VALUES (?,?,?,?,?,?,?,?)');
+  const ins = db.prepare('INSERT OR IGNORE INTO prod_lock(date_ro,isp,fcst,sched,curver,xb,cons,lean,locked_at) VALUES (?,?,?,?,?,?,?,?,?)');
   for (const { isp, ts } of dayTimestamps(ni.date)) {
     const Tms = new Date(ts).getTime();
     if (Tms >= gateMs || Tms < gateMs - 15 * signModel.MIN) continue; // lock ONLY the interval that JUST crossed the gate
     if (has.get(ni.date, isp)) continue;                              // lock once
     const b = prodBlendAt(ni.date, isp); if (!b) continue;
-    ins.run(ni.date, isp, +b.fcst.toFixed(1), b.sched === null ? null : +b.sched.toFixed(1), b.curver === null ? null : +b.curver.toFixed(1), b.xb === null ? null : +b.xb.toFixed(1), b.cons == null ? null : +b.cons.toFixed(1), new Date().toISOString());
+    ins.run(ni.date, isp, +b.fcst.toFixed(1), b.sched === null ? null : +b.sched.toFixed(1), b.curver === null ? null : +b.curver.toFixed(1), b.xb === null ? null : +b.xb.toFixed(1), b.cons == null ? null : +b.cons.toFixed(1), b.lean == null ? null : +b.lean.toFixed(1), new Date().toISOString());
   }
 }
 setInterval(() => { try { lockDueProd(); } catch (e) { console.error('prod lock:', e.message); } }, 60000);
@@ -1770,7 +1772,7 @@ async function predictPage(date) {
   try { pdWind = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_wind_onshore' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
   // production + Real X-B forecasts LOCKED at the trade gate (prod_lock; mirrors the sign predictor's lock discipline)
   let prodLock = new Map();
-  try { prodLock = new Map(db.prepare('SELECT isp, fcst, xb, cons FROM prod_lock WHERE date_ro=?').all(date).map((r) => [r.isp, { fcst: r.fcst, xb: r.xb, cons: r.cons }])); } catch { /* table may be absent */ }
+  try { prodLock = new Map(db.prepare('SELECT isp, fcst, xb, cons, lean FROM prod_lock WHERE date_ro=?').all(date).map((r) => [r.isp, { fcst: r.fcst, xb: r.xb, cons: r.cons, lean: r.lean }])); } catch { /* table may be absent */ }
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
@@ -1865,7 +1867,7 @@ async function predictPage(date) {
       : fcstProdCell(fcstProd);
     const _row = `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : ''}${winClass} t-${tState}${gateBoundary ? ' gateopen' : ''}${isLive ? ' liverow' : ''}">
       <td><span class="exp" data-isp="${isp}" title="expand — show this interval on the previous 2 days">▸</span> <b>${isp}</b>${gateBoundary ? ' <span class="tradearrow" title="current trade interval — the soonest interval still open to trade">▶</span>' : isCurrent ? ' <span title="current interval, in delivery now">🕐</span>' : isp === lastRealIsp ? ' ●' : ''}${tState === 'locked' ? ' <span class="lockico" title="locked for trading — within the 75-min gate">🔒</span>' : ''}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
-      <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` : (() => {
+      <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` + (plv != null && plv.lean != null ? ` <small class="xbf ${Math.sign(plv.lean) === Math.sign(imb) ? 'fc-ok' : 'fc-bad'}" title="imbalance lean as recorded at the 75-min gate, vs realized (green = sign matched)">(${plv.lean > 0 ? 'S' : 'D'} ${fmt(Math.abs(plv.lean))})</small>` : '') : (() => {
         // forward imbalance value = the PHYSICAL-IDENTITY lean (user-spec 2026-07-03): (Fcst Real X-B − Notif X-B)/4 MWh.
         // Honest caveat baked into the tooltip: at the 75-min lead this lean's SIGN is ~coin-flip (52% validated,
         // corr 0.12 vs realized) — it's a MAGNITUDE/pressure read; the calibrated sign call stays the S/D% badge.
