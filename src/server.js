@@ -233,6 +233,26 @@ const colPicker = (key, mobileHidden, defaultHidden) => `
     localStorage.setItem(key,JSON.stringify(Array.from(hidden)));
     apply();
   });
+  // Keep the panel inside the viewport. It is right-anchored to the "Columns" button, but that button sits near the
+  // LEFT edge of the banner — so a wide 2-column panel hung ~200px off the left edge and its whole first column of
+  // checkboxes was unreachable. Measure on open and slide it back in (phones keep the fixed left:8/right:8 CSS).
+  function place(){
+    panel.style.left='';panel.style.right='';panel.style.top='';     // reset to the CSS anchors, then measure
+    var mob=window.matchMedia('(max-width:760px)').matches;
+    var wrap=panel.parentNode.getBoundingClientRect();
+    if(!mob){                                                        // phones: CSS already pins left/right to both edges
+      var w=panel.offsetWidth,want=wrap.right-w;                     // where right-anchoring puts its left edge
+      var left=Math.max(8,Math.min(want,window.innerWidth-8-w));     // clamp into the viewport
+      if(Math.abs(left-want)>0.5){panel.style.right='auto';panel.style.left=(left-wrap.left)+'px';}
+    }
+    var r=panel.getBoundingClientRect();                             // vertical: phones' fixed top:auto can park it ABOVE the viewport
+    if(r.top<8||r.bottom>window.innerHeight-8){
+      var top=Math.max(8,Math.min(wrap.bottom+6,window.innerHeight-8-r.height));
+      panel.style.top=(mob?top:top-wrap.top)+'px';                   // fixed → viewport coords; absolute → relative to .colwrap
+    }
+  }
+  new MutationObserver(function(){if(panel.classList.contains('open'))place();}).observe(panel,{attributes:true,attributeFilter:['class']});
+  window.addEventListener('resize',function(){if(panel.classList.contains('open'))place();});
   // close the panel when clicking/tapping anywhere outside it
   document.addEventListener('click',function(e){
     if(panel.classList.contains('open')&&!panel.contains(e.target)&&!e.target.closest('.colwrap'))
@@ -515,7 +535,8 @@ tr.lastneg td{background:var(--tint-neg-strong) !important;border-top:2px solid 
 .pill2 small{color:var(--fg-muted)}
 .colwrap{display:flex;align-items:center;position:relative}
 .colpanel{display:none;position:absolute;top:40px;right:0;background:var(--bg-surface);border:1px solid var(--border-2);
-  border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.4);padding:10px 16px;z-index:60;columns:2;min-width:380px}
+  border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.4);padding:10px 16px;z-index:60;columns:2;min-width:380px;
+  max-width:calc(100vw - 16px);max-height:min(70vh,520px);overflow:auto}
 .colpanel.open{display:block}
 .colpanel label{display:block;font-size:12px;padding:3px 0;white-space:nowrap;cursor:pointer}
 tr.winstart td{border-top:3px solid var(--fg-muted)}
@@ -1607,6 +1628,13 @@ async function predictPage(date) {
   // per-interval SCADA generation mix (avg over the interval's sen_live readings) → the prod split on SETTLED rows
   const senMix = new Map();
   try { for (const r of db.prepare("SELECT isp, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu FROM sen_live WHERE date_ro=? AND solar IS NOT NULL GROUP BY isp").all(date)) senMix.set(r.isp, { solar: r.so, wind: r.wi, hydro: r.hy, nuclear: r.nu }); } catch { /* sen_live may be absent */ }
+  // FALLBACK for the realized "Real prod/cons/X-B" values. Those read the SEN-GRAFIC scrape (liveSEN), but that
+  // endpoint goes dark for hours at a time (server-to-server black-hole) — and when it does, every Real cell fell
+  // back to the italic forecast and the per-source split (which needs a realized prod) vanished entirely. We already
+  // record the SAME telemetry 24/7 from the sen-filter feed into sen_live, so use its per-interval average for any
+  // interval the scrape didn't return. Kept as a separate map so the liveSEN cache is never polluted.
+  const senFb = new Map();
+  try { for (const r of db.prepare("SELECT isp, AVG(prod) p, AVG(cons) c, AVG(sold) s FROM sen_live WHERE date_ro=? AND prod IS NOT NULL GROUP BY isp").all(date)) senFb.set(r.isp, { prod: r.p, cons: r.c, sold: r.s }); } catch { /* sen_live may be absent */ }
   const [P, E, G, C, X] = await Promise.all(
     ['estimatedImbalancePrices', 'estimatedPowerSystemImbalance', 'generationSchedules', 'dailyConsumptionOverview', 'scheduledExchanges']
       .map((c) => liveReport(c, date).catch(() => new Map())),
@@ -1854,7 +1882,7 @@ async function predictPage(date) {
     const price = p ? rnum(p.estimatedPricePositiveImbalance) : null;
     // price not yet published by DAMAS → compute it from the early-publishing balancing-energy data
     const epImb = (price !== null || !p) ? null : earlyPrice(imb, rnum(p.sumQup), rnum(p.sumQdn), rnum(p.sumQupPup), rnum(p.sumQdownPdn));
-    const sen = SEN.get(isp);
+    const sen = SEN.get(isp) || senFb.get(isp); // scrape first, recorded sen_live telemetry when it's dark
     const realProd = sen ? sen.prod : null;
     const notifProd = g ? rnum(g.brpsProduction) : null;
     const realCons = sen ? sen.cons : null;
