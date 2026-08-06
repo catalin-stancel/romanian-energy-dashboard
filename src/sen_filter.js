@@ -58,13 +58,19 @@ const tsInterval = (s) => {
 };
 
 async function fetchSenFilter() {
-  const r = await fetch(URL + '?_=' + Date.now(), { headers: HDRS });
-  if (!r.ok) return null;
-  const arr = await r.json();
-  const m = {}; for (const o of arr) for (const k in o) m[k] = o[k]; // flatten array of {key:val}
-  const d = { ts: m.row1_HARTASEN_DATA || null, raw: m };
-  for (const [code, name] of Object.entries(DECODE)) d[name] = num(m[code]);
-  return d.sold !== null ? d : null;
+  // hard timeout — Node fetch has none; transelectrica.ro intermittently black-holes server-to-server
+  // requests, which would otherwise hang the /predict page and the 24/7 logger indefinitely.
+  const ac = new AbortController();
+  const to = setTimeout(() => ac.abort(), 6000);
+  try {
+    const r = await fetch(URL + '?_=' + Date.now(), { headers: HDRS, signal: ac.signal });
+    if (!r.ok) return null;
+    const arr = await r.json(); // body read UNDER the timer
+    const m = {}; for (const o of arr) for (const k in o) m[k] = o[k]; // flatten array of {key:val}
+    const d = { ts: m.row1_HARTASEN_DATA || null, raw: m };
+    for (const [code, name] of Object.entries(DECODE)) d[name] = num(m[code]);
+    return d.sold !== null ? d : null;
+  } finally { clearTimeout(to); }
 }
 
 function ensureTable(db) {

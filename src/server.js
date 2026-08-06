@@ -1107,6 +1107,23 @@ function widgetData() {
 // Pure live fetch (independent of the pull job), 55s server-side cache. Renders like the PI
 // page: all 96 intervals chronological, current=yellow ▶, last-settled=green ●, window rails.
 const DAMAS_BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/';
+// Node's fetch has NO timeout — transelectrica.ro intermittently stops responding to server-to-server requests
+// (black-holes the connection), which would hang the awaiting page (/predict, /pilearn) FOREVER. Wrap every live
+// fetch so a dead host ABORTS (→ the caller's .catch → cached/last-good data) instead of freezing the request.
+// The body is read INSIDE the timer too, so a headers-then-stalled-body can't slip past.
+async function fetchT(url, opts = {}, ms = 8000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ac.signal });
+    return { ok: r.ok, status: r.status, text: await r.text() };
+  } finally { clearTimeout(t); }
+}
+// Per-endpoint circuit breakers for the flaky live host: after a failure, skip that endpoint for a cooldown and
+// serve last-good/cache immediately (→ /predict stays fast during an outage), then one request re-probes.
+function makeBreaker(cooldownMs = 45000) { let until = 0; return { down: () => Date.now() < until, markDown: () => { until = Date.now() + cooldownMs; }, markUp: () => { until = 0; } }; }
+const graficBrk = makeBreaker();   // liveSEN (SEN-grafic feed)
+const filterBrk = makeBreaker();   // liveSenFilter (sen-filter homepage feed)
 // generic single-report DAMAS fetch (15s cache) — shared by the Predict and PI-learn pages
 const reportCache = {};
 async function liveReport(cmd, date) {
@@ -1117,7 +1134,8 @@ async function liveReport(cmd, date) {
   const to = new Date(new Date(date + 'T00:00:00Z').getTime() + 86400000).toISOString();
   const u = new URL(DAMAS_BASE + 'publicReport/' + cmd);
   u.searchParams.set('timeInterval', JSON.stringify({ from, to }));
-  const all = (await (await fetch(u)).json()).itemList || [];
+  const res = await fetchT(u, {}, 6000);
+  const all = (res.ok ? JSON.parse(res.text).itemList : null) || [];
   const map = new Map();
   for (const it of all) { const ri = roDateIsp(new Date(it.timeInterval.from)); if (ri.date === date) map.set(ri.isp, it); }
   reportCache[key] = { at: Date.now(), map };
@@ -1137,6 +1155,7 @@ async function liveSEN(date, maxAge = 45000) {
   // (esp. from cloud egress) — refetching too often just invites failures. Reuse only a NON-EMPTY fresh cache.
   // The live current-interval Real-X-B endpoint passes a shorter maxAge (~20s) to track the current interval.
   if (c && c.map.size && Date.now() - c.at < maxAge) return c.map;
+  if (graficBrk.down()) return c ? c.map : new Map(); // breaker open → last-good, don't hit the dead host
   const [y, mo, d] = date.split('-');
   const pre = '&_SENGrafic_WAR_SENGraficportlet_';
   const u = 'https://www.transelectrica.ro/widget/web/tel/sen-grafic?p_p_id=SENGrafic_WAR_SENGraficportlet&p_p_lifecycle=2&p_p_state=maximized&p_p_mode=view&p_p_cacheability=cacheLevelPage'
@@ -1145,11 +1164,11 @@ async function liveSEN(date, maxAge = 45000) {
     + pre + 'end_day=' + (+d) + pre + 'end_month=' + (+mo) + pre + 'end_year=' + y + pre + 'end_Hour=23' + pre + 'end_Minute=59';
   const HDRS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36', 'Accept': '*/*', 'X-Requested-With': 'XMLHttpRequest' };
   // Retry the flaky SEN host; NEVER cache an empty result — fall back to last-good so Real columns don't blank.
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const r = await fetch(u, { headers: HDRS });
+      const r = await fetchT(u, { headers: HDRS }, 3500);
       if (r.ok) {
-        const t = await r.text();
+        const t = r.text;
         const map = new Map();
         for (const row of t.split('|')) {
           const f = row.split(';');
@@ -1159,11 +1178,12 @@ async function liveSEN(date, maxAge = 45000) {
           const isp = Math.floor((+m[4] * 60 + +m[5]) / 15) + 1; // RO-local minutes → ISP (last sample wins)
           map.set(isp, { cons: +f[1], prod: +f[3], sold: +f[4] });
         }
-        if (map.size) { senCache[date] = { at: Date.now(), map }; return map; }
+        if (map.size) { senCache[date] = { at: Date.now(), map }; graficBrk.markUp(); return map; }
       }
     } catch { /* fall through to retry */ }
-    if (attempt < 3) await new Promise((res) => setTimeout(res, 500));
+    if (attempt < 2) await new Promise((res) => setTimeout(res, 500));
   }
+  graficBrk.markDown(); // host unresponsive → open the breaker so the next loads skip it
   return c ? c.map : new Map(); // all attempts failed → last-good (stale) data, else empty
 }
 
@@ -1309,8 +1329,10 @@ try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } 
 let senFilterCache = { at: 0, data: null };
 async function liveSenFilter(maxAge = 10000) {
   if (senFilterCache.data && Date.now() - senFilterCache.at < maxAge) return senFilterCache.data;
+  if (filterBrk.down()) return senFilterCache.data; // breaker open → last-good, don't hit the dead host
   const d = await senFilter.fetchSenFilter().catch(() => null);
-  if (d) { senFilterCache = { at: Date.now(), data: d }; try { senFilter.record(db, d, roDateIsp); } catch (e) { console.error('sen_live record:', e.message); } return d; }
+  if (d) { filterBrk.markUp(); senFilterCache = { at: Date.now(), data: d }; try { senFilter.record(db, d, roDateIsp); } catch (e) { console.error('sen_live record:', e.message); } return d; }
+  filterBrk.markDown();
   return senFilterCache.data;
 }
 
