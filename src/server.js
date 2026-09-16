@@ -15,6 +15,9 @@ const { openDb, roDateIsp } = require('./db');
 
 const PORT = process.env.PORT || 8077;
 const db = openDb();
+// node:sqlite is synchronous: a write waiting on the lock freezes the event loop — and /health with it, which made
+// Render restart the instance in a loop. Jobs keep the 60 s default; the UI never waits more than a moment.
+db.exec('PRAGMA busy_timeout = 1500');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS user_bets (
@@ -1348,11 +1351,23 @@ try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { /* ignore
 // index for per-hour weather lookups (weather PK starts with `point`, so ts_utc filters were full scans ~230ms)
 try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } catch (e) { /* table may not exist yet */ }
 let senFilterCache = { at: 0, data: null };
+let _senLiveAt = { at: 0, v: 0 };
+function lastSenLiveAt() { // cached 30 s: when did the xb_pi job last store a sen_live row
+  if (Date.now() - _senLiveAt.at < 30000) return _senLiveAt.v;
+  try { const r = db.prepare("SELECT MAX(pulled_at) p FROM sen_live WHERE date_ro=?").get(roDateIsp(new Date()).date); _senLiveAt = { at: Date.now(), v: r && r.p ? Date.parse(r.p) : 0 }; } catch { _senLiveAt = { at: Date.now(), v: 0 }; }
+  return _senLiveAt.v;
+}
 async function liveSenFilter(maxAge = 10000) {
   if (senFilterCache.data && Date.now() - senFilterCache.at < maxAge) return senFilterCache.data;
   if (filterBrk.down()) return senFilterCache.data; // breaker open → last-good, don't hit the dead host
   const d = await senFilter.fetchSenFilter().catch(() => null);
-  if (d) { filterBrk.markUp(); senFilterCache = { at: Date.now(), data: d }; try { senFilter.record(db, d, roDateIsp); } catch (e) { console.error('sen_live record:', e.message); } return d; }
+  if (d) {
+    filterBrk.markUp(); senFilterCache = { at: Date.now(), data: d };
+    // the xb_pi job records sen_live every minute; the UI only steps in when that looks dead (no row for 3 min) —
+    // otherwise two processes fight for the write lock on every poll.
+    if (Date.now() - lastSenLiveAt() > 180000) { try { senFilter.record(db, d, roDateIsp); } catch (e) { console.error('sen_live record:', e.message); } }
+    return d;
+  }
   filterBrk.markDown();
   return senFilterCache.data;
 }

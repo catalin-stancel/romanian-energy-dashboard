@@ -6,7 +6,7 @@
 //   node src/pull_signals.js         (scheduled every ~15 min)
 // CONFIG: set SIGNAL_URL / SIGNAL_USER / SIGNAL_PASS in the environment (Render dashboard). Public repo → NO defaults.
 const https = require('https');
-const { openDb, roDateIsp } = require('./db');
+const { beginImmediate, openDb, roDateIsp } = require('./db');
 
 const SRC = process.env.SIGNAL_URL || '';
 const USER = process.env.SIGNAL_USER || '';
@@ -59,7 +59,7 @@ function autoFillFromDesk(db, now) {
   const log = db.prepare('INSERT INTO user_bets_log (date_ro, isp, qty, saved_at) VALUES (?,?,?,?)');
   const today = roDateIsp(now).date; // sync the desk's active/future delivery date(s); never rewrite settled past days
   const ts = now.toISOString(); let n = 0;
-  db.exec('BEGIN');
+  beginImmediate(db);
   for (const s of sigs) {
     if (s.date_ro < today) continue; // no fixed 10:00 freeze → the FINAL desk plan is always captured each day; a date naturally freezes once the desk rolls to the next delivery date (its ext_signals stop updating)
     const signed = s.sig === 'BUY' ? s.q : s.sig === 'SELL' ? -s.q : 0; // PZU-side: BUY=+ (surplus), SELL=−
@@ -83,7 +83,7 @@ async function main() {
   db.exec('CREATE TABLE IF NOT EXISTS ext_signals(date_ro TEXT, isp INTEGER, sig TEXT, q REAL, ts_utc TEXT, delivery_date TEXT, pulled_at TEXT, PRIMARY KEY(date_ro, isp))');
   const now = new Date().toISOString();
   const up = db.prepare('INSERT INTO ext_signals(date_ro,isp,sig,q,ts_utc,delivery_date,pulled_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(date_ro,isp) DO UPDATE SET sig=excluded.sig, q=excluded.q, ts_utc=excluded.ts_utc, delivery_date=excluded.delivery_date, pulled_at=excluded.pulled_at');
-  db.exec('BEGIN'); let n = 0; for (const r of rows) { up.run(r.date, r.isp, r.sig, r.q, r.ts, dd, now); n++; } db.exec('COMMIT');
+  beginImmediate(db); let n = 0; for (const r of rows) { up.run(r.date, r.isp, r.sig, r.q, r.ts, dd, now); n++; } db.exec('COMMIT');
   console.log(`stored ${n} rows into ext_signals`);
   // desk signal IS the position: auto-fill user_bets (replaces the old model auto-fill), then lock@10:00 + PI P&L track it
   const nf = autoFillFromDesk(db, new Date());

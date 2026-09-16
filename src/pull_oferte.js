@@ -8,7 +8,7 @@
 //          E PRODUCT aFRR/mFRR/RR | F DIRECTION up/down | G BID ID | H TECH GROUP | I-L links |
 //          M DIVISIBILITY | N MIN MW | O MAX MW | P PRICE [currency/MWh] | Q CURRENCY | R ACTIVATION TYPE
 const AdmZip = require('adm-zip');
-const { openDb } = require('./db');
+const { beginImmediate, openDb } = require('./db');
 
 function parseSharedStrings(xml) {
   const out = [];
@@ -92,7 +92,7 @@ function main() {
   for (const sheet of sheets) {
     const xml = zip.readAsText(sheet.path);
     let n = 0;
-    db.exec('BEGIN');
+    beginImmediate(db);
     db.prepare('DELETE FROM offers WHERE date_ro = ?').run(sheet.name);
     for (const cells of rows(xml)) {
       const mtu = num(cells.C);

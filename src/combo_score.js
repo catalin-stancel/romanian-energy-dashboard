@@ -13,7 +13,7 @@
 // rolling scorecard.
 const fs = require('fs');
 const path = require('path');
-const { openDb, roDateIsp } = require('./db');
+const { beginImmediate, openDb, roDateIsp } = require('./db');
 const M = require('./combo_model');
 
 const FREEZE_MIN = 75;
@@ -116,7 +116,7 @@ function main() {
   const isLocked = db.prepare('SELECT horizon_min FROM combo_pred WHERE kind=? AND ts_utc=?');
 
   let nIntra = 0, nD1 = 0;
-  db.exec('BEGIN');
+  beginImmediate(db);
   const today = roDateIsp(new Date(nowMs)).date;
   for (const tg of M.upcomingTargets(nowMs)) {
     const horizon = (tg.Tms - nowMs) / M.MIN;
@@ -156,7 +156,7 @@ function main() {
     model_correct=?, persist_correct=?, pnl_ron=? WHERE kind=? AND ts_utc=?`);
   const pending = db.prepare('SELECT kind, ts_utc, isp, pred_surplus, conf, qty, da_ref, persist_surplus FROM combo_pred WHERE realized_imb IS NULL');
   let nScored = 0;
-  db.exec('BEGIN');
+  beginImmediate(db);
   for (const r of pending.all()) {
     const imb = imbAt.get(r.ts_utc)?.v; if (imb === undefined || imb === null) continue;
     const realizedSurplus = imb > 0 ? 1 : 0;

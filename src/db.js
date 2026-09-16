@@ -42,6 +42,9 @@ function openDb() {
     CREATE TABLE IF NOT EXISTS pull_log (
       source TEXT, args TEXT, started TEXT, finished TEXT, rows INTEGER, error TEXT
     );
+    -- pull_weather's weather_hourly refresh filters by pulled_at (last PK column → unusable); without this index the
+    -- refresh scanned the whole weather table inside a write transaction every hour and locked every other writer out.
+    CREATE INDEX IF NOT EXISTS idx_weather_pulled ON weather (pulled_at);
   `);
   return db;
 }
@@ -84,4 +87,20 @@ function makeUpserter(db) {
   };
 }
 
-module.exports = { openDb, roDateIsp, makeUpserter, DB_PATH };
+// Retry a write that lost a race for the DB lock. PRAGMA busy_timeout covers the ordinary case, but SQLite returns
+// SQLITE_BUSY *immediately* (no busy handler) when a deferred transaction must upgrade a read snapshot another
+// connection invalidated — hence every writer uses BEGIN IMMEDIATE, wrapped here with backoff instead of aborting.
+function retryBusy(fn, tries = 5, baseMs = 120) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return fn(); } catch (e) {
+      if (!/database is locked|SQLITE_BUSY/i.test(e.message || '')) throw e;
+      last = e;
+      if (i < tries - 1) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, baseMs * 2 ** i);
+    }
+  }
+  throw last;
+}
+function beginImmediate(db) { retryBusy(() => db.exec('BEGIN IMMEDIATE')); }
+
+module.exports = { openDb, roDateIsp, makeUpserter, retryBusy, beginImmediate, DB_PATH };

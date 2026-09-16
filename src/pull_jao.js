@@ -4,17 +4,22 @@
 //   atc:          remaining/offered ATC on the RO-BG virtual-hub border after day-ahead (the intraday-stage capacity).
 //   node tool\pull_jao.js            (today + tomorrow; schedule hourly)
 //   node tool\pull_jao.js backfill 2026-06-20 2026-07-08
-const { openDb, makeUpserter } = require('./db');
+const { beginImmediate, openDb, makeUpserter } = require('./db');
 const BASE = 'https://publicationtool.jao.eu/core/api/data/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function fetchDay(ep, day) {
   const from = day + 'T00:00:00.000Z', to = day + 'T23:59:59.000Z';
   const u = BASE + ep + '?FromUtc=' + encodeURIComponent(from) + '&ToUtc=' + encodeURIComponent(to);
-  const r = await fetch(u, { signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!r.ok) throw new Error(ep + ' HTTP ' + r.status);
-  const j = await r.json();
-  return j.data || [];
+  // the JAO publication API stalls a couple of times a day (30 s timeouts / resets): one retry after a pause
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await fetch(u, { signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!r.ok) throw new Error(ep + ' HTTP ' + r.status);
+      const j = await r.json();
+      return j.data || [];
+    } catch (e) { if (attempt >= 1 || /HTTP 4/.test(e.message)) throw e; await sleep(5000); }
+  }
 }
 
 const MAPS = [
@@ -38,7 +43,7 @@ async function main() {
     for (const day of days) {
       try {
         const rows = await fetchDay(ep, day);
-        db.exec('BEGIN');
+        beginImmediate(db);
         for (const r of rows) {
           const ts = new Date(r.dateTimeUtc).toISOString();
           for (const [src, name] of Object.entries(fields)) {

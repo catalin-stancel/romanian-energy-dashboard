@@ -5,7 +5,7 @@
 //   node tool\pull_entsoe.js list              (show catalog)
 //
 // Token: tool\config.json {"entsoe_token":"..."} or ENTSOE_TOKEN env var.
-const { openDb, makeUpserter } = require('./db');
+const { beginImmediate, openDb, makeUpserter } = require('./db');
 const { getToken, apiGet, parseDocument, fmtPeriod, sleep } = require('./entsoe');
 
 const RO = '10YRO-TEL------P';
@@ -65,7 +65,7 @@ async function pullSeries(db, token, entry, from, to) {
         token,
       );
       if (docs) {
-        db.exec('BEGIN');
+        beginImmediate(db);
         for (const xml of docs) {
           const rows = parseDocument(xml);
           for (const r of rows) upsert(entry.name + r.suffix, r.ts.toISOString(), r.value);

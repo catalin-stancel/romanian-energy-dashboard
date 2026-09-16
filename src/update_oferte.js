@@ -23,9 +23,21 @@ async function download() {
   throw new Error('still got HTML after confirm retry');
 }
 
+// transient DNS/network failures (getaddrinfo ENOTFOUND drive.usercontent.google.com) — retry with backoff
+async function downloadRetry(tries = 4) {
+  for (let i = 0; ; i++) {
+    try { return await download(); } catch (e) {
+      const transient = /ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(String((e.cause && e.cause.message) || e.message));
+      if (!transient || i >= tries - 1) throw e;
+      const wait = 30000 * 2 ** i; console.warn(`download failed — retry ${i + 1}/${tries - 1} in ${wait / 1000}s`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 (async () => {
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  const buf = await download();
+  const buf = await downloadRetry();
   fs.writeFileSync(OUT, buf);
   console.log(`downloaded ${(buf.length / 1e6).toFixed(1)} MB -> ${OUT}`);
   execFileSync(process.execPath, ['--max-old-space-size=6144', path.join(__dirname, 'pull_oferte.js'), OUT], {

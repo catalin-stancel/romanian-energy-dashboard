@@ -7,7 +7,7 @@
 // Discovered endpoint (no auth):
 //   GET https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/
 //       publicReport/estimatedImbalancePrices?timeInterval={"from":"<ISO>","to":"<ISO>"}
-const { openDb, makeUpserter } = require('./db');
+const { beginImmediate, openDb, makeUpserter } = require('./db');
 
 const BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/';
 
@@ -84,7 +84,7 @@ async function pull(db, from, to) {
       let items;
       try { items = await fetchInterval(rep.cmd, new Date(t).toISOString(), new Date(tEnd).toISOString()); }
       catch (e) { console.warn(`  ${rep.cmd}: ${e.message}`); continue; }
-      db.exec('BEGIN');
+      beginImmediate(db);
       for (const item of items) {
         const ts = item.timeInterval.from;
         if (rep.borders) {

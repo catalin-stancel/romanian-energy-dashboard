@@ -3,7 +3,7 @@
 // Purpose: capture how intraday (PI) trading moves a delivery interval's position through the day, so we can
 // later test whether that belief-updating (the PI evolution) LEADS the realized imbalance.
 //   node tool/log_xb_pi.js     (schedule every ~10 min)
-const { openDb, roDateIsp } = require('./db');
+const { beginImmediate, openDb, roDateIsp } = require('./db');
 const BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/';
 const num = (v) => { const n = Number(v); return v !== null && v !== undefined && v !== 'N/A' && Number.isFinite(n) ? n : null; };
 const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', 'rsro', 'uaro', 'mdro'];
@@ -27,7 +27,7 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
   const lastMap = new Map();
   for (const r of db.prepare('SELECT ts_utc, pi, commercial, MAX(pulled_at) mp FROM xb_pi_snap WHERE ts_utc > ? GROUP BY ts_utc').all(new Date(nowMs).toISOString())) lastMap.set(r.ts_utc, r);
   let n = 0;
-  db.exec('BEGIN');
+  beginImmediate(db);
   for (const item of items) {
     const ts = item.timeInterval && item.timeInterval.from;
     if (!ts || new Date(ts).getTime() <= nowMs) continue; // only pre-delivery (upcoming) intervals
@@ -69,7 +69,7 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
       const lastD = new Map();
       for (const r of db.prepare('SELECT ts_utc, delta, MAX(pulled_at) m FROM xb_delta_snap WHERE ts_utc>? GROUP BY ts_utc').all(new Date(nowMs - 3 * 3600000).toISOString())) lastD.set(r.ts_utc, r.delta);
       const insD = db.prepare('INSERT INTO xb_delta_snap VALUES (?,?,?,?,?,?,?)');
-      let dN = 0; db.exec('BEGIN');
+      let dN = 0; beginImmediate(db);
       for (const item of items) {
         const ts = item.timeInterval && item.timeInterval.from; if (!ts) continue;
         const tms = new Date(ts).getTime();
@@ -100,7 +100,7 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
     const eu = new URL(BASE + 'publicReport/estimatedImbalancePrices');
     eu.searchParams.set('timeInterval', JSON.stringify({ from, to }));
     const eItems = (await (await fetch(eu)).json()).itemList || [];
-    let llN = 0; db.exec('BEGIN');
+    let llN = 0; beginImmediate(db);
     for (const it of eItems) {
       const ts = it.timeInterval && it.timeInterval.from; if (!ts) continue;
       const tms = new Date(ts).getTime(); if (tms > nowMs || tms < winFrom) continue; // delivered/current only

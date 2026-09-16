@@ -8,7 +8,7 @@
 // CSRF token + session cookie, POST trading_for=DD/MM/YYYY). Interval alignment: see aligncheck —
 // verified 2026-06-11: OPCOM intervals are CET-day based (interval 1 starts 00:00 CET = 01:00 EET),
 // i.e. OPCOM interval i maps to our EET ISP i+4, with i=93..96 spilling into the next EET day.
-const { openDb, makeUpserter, roDateIsp } = require('./db');
+const { beginImmediate, openDb, makeUpserter, roDateIsp } = require('./db');
 
 const URL_ = 'https://www.opcom.ro/grafice-ip-raportPIP-si-volumTranzactionat/ro';
 const UA = { 'User-Agent': 'Mozilla/5.0' };
@@ -103,7 +103,7 @@ async function main() {
   for (const day of dates) {
     try {
       const prices = await fetchDay(session, day);
-      db.exec('BEGIN');
+      beginImmediate(db);
       for (const [i, ron] of prices) {
         upsert('pzu_ron', tsForOpcomInterval(day, i), ron);
         total++;

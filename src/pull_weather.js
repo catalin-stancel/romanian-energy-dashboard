@@ -4,7 +4,7 @@
 //   node tool\pull_weather.js          (pull current forecast run, all points/models)
 //
 // Every pull is stored with pulled_at so run-to-run forecast revisions can be computed later.
-const { openDb } = require('./db');
+const { beginImmediate, openDb } = require('./db');
 
 const POINTS = {
   // Dobrogea wind belt (most of RO's ~3 GW wind)
@@ -36,7 +36,7 @@ async function main() {
     const data = await res.json();
     const hourly = data.hourly;
     const times = hourly.time; // ISO, UTC
-    db.exec('BEGIN');
+    beginImmediate(db);
     for (const model of MODELS) {
       for (const v of VARS) {
         const series = hourly[`${v}_${model}`] ?? (MODELS.length === 1 ? hourly[v] : undefined);

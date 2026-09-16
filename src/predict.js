@@ -10,7 +10,7 @@
 // replace it, they only appear as "live view".
 const fs = require('fs');
 const path = require('path');
-const { openDb, roDateIsp } = require('./db');
+const { beginImmediate, openDb, roDateIsp } = require('./db');
 const { buildContext, featuresFor, FEATURE_NAMES, MIN } = require('./features');
 
 const FREEZE_MIN = 75;
@@ -190,7 +190,7 @@ function main() {
   const ins = db.prepare(`INSERT OR REPLACE INTO predictions
     (run_at, ts_utc, date_ro, isp, horizon_min, actionable, prob_long, price_p10, price_p50, price_p90, model_version, imb_p50)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
-  db.exec('BEGIN');
+  beginImmediate(db);
   let n = 0;
   for (const target of targets) {
     const horizonMin = (target.getTime() - now.getTime()) / MIN;
@@ -241,7 +241,7 @@ function autoFillUserBets(db, runAt, now) {
   try {
     unlocked = new Set(db.prepare(`SELECT date_ro FROM page_unlocks WHERE unlocked=1`).all().map((r) => r.date_ro));
   } catch { /* table created by server on first run */ }
-  db.exec('BEGIN');
+  beginImmediate(db);
   for (const b of bets) {
     // frozen after 10:00 CET D-1 — unless the user explicitly unlocked the sheet
     if (now.getTime() >= lockTimeFor(b.date_ro).getTime() && !unlocked.has(b.date_ro)) continue;
@@ -289,7 +289,7 @@ function computeBets(db, model, now, runAt) {
   }
 
   let n = 0;
-  db.exec('BEGIN');
+  beginImmediate(db);
   for (const r of rows) {
     // PZU benchmark: official OPCOM RON price > ENTSO-E EUR converted > 7d same-ISP RON average
     let daRef, est = 0;

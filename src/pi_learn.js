@@ -6,7 +6,7 @@
 // Scoreboard: model (persist+PI) accuracy vs persist-alone baseline. If w2 stabilizes non-zero AND model>persist,
 // the PI order-flow signal is real. Learns as it goes — starts uninformed, self-calibrates.
 //   node tool/pi_learn.js     (schedule every ~15 min)
-const { openDb } = require('./db');
+const { beginImmediate, openDb } = require('./db');
 const LEAD_MIN = 60, IMB_LAG_MIN = 25, LR = 0.05, L2 = 0.0005;
 const sig = (z) => 1 / (1 + Math.exp(-z));
 
@@ -38,7 +38,7 @@ try {
   // learnable = settled intervals (realized present) that have pre-A snapshots and weren't learned yet
   const candidates = [...byTs.keys()].filter((ts) => imb.has(ts) && !done.has(ts)).sort();
   // one transaction: keeps the logged samples and the SGD weight state in lockstep (no half-applied learning if it dies mid-loop)
-  db.exec('BEGIN');
+  beginImmediate(db);
   for (const ts of candidates) {
     const T = new Date(ts).getTime();
     const A = T - LEAD_MIN * 60000;
