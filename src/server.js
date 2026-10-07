@@ -1394,10 +1394,21 @@ async function liveReport(cmd, date) {
   const to = new Date(new Date(date + 'T00:00:00Z').getTime() + 86400000).toISOString();
   const u = new URL(DAMAS_BASE + 'publicReport/' + cmd);
   u.searchParams.set('timeInterval', JSON.stringify({ from, to }));
-  const res = await fetchT(u, {}, 6000);
-  const all = (res.ok ? JSON.parse(res.text).itemList : null) || [];
-  const map = new Map();
-  for (const it of all) { const ri = roDateIsp(new Date(it.timeInterval.from)); if (ri.date === date) map.set(ri.isp, it); }
+  // A failed/empty answer must NEVER replace a good map: one DAMAS timeout used to cache an empty map for 15 s and the
+  // Predict page rendered 96 rows with blank Imbalance/Price/Notif cells ("no data") on local AND live at once.
+  // On failure serve the last-good map (any age) and re-probe after 5 s instead of 15.
+  let map = null, why = '';
+  try {
+    const res = await fetchT(u, {}, 6000);
+    if (!res.ok) why = 'HTTP ' + res.status;
+    else { const all = JSON.parse(res.text).itemList || []; map = new Map(); for (const it of all) { const ri = roDateIsp(new Date(it.timeInterval.from)); if (ri.date === date) map.set(ri.isp, it); } if (!map.size && c && c.map.size) { why = 'empty itemList'; map = null; } }
+  } catch (e) { why = (e && e.name === 'AbortError') ? 'timeout 6 s' : (e && e.message || 'error').slice(0, 80); }
+  if (!map) {
+    console.error(`[damas] ${cmd} ${date}: ${why} → serving last-good${c ? ' (' + Math.round((Date.now() - c.at) / 1000) + ' s old)' : ' (none)'}`);
+    map = c ? c.map : new Map();
+    reportCache[key] = { at: Date.now() - 10000, map }; // retry in 5 s, keep the good map meanwhile
+    return map;
+  }
   reportCache[key] = { at: Date.now(), map };
   return map;
 }
@@ -2532,7 +2543,7 @@ ${huBar}<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px
 <div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="pibar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="resscore" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
-<table><caption class="gatecap">${gateCaption}</caption><tr><th>Int<span class="xbutgl" onclick="toggleXbu()" title="show/hide the per-interval border capacity used — H = Hungary imp/exp (vs JAO flow-based max), B = Bulgaria imp/exp (vs official NTC)"></span></th><th>CET</th>${head}</tr>
+<table data-damas="${P.size ? 1 : 0}"><caption class="gatecap">${gateCaption}</caption><tr><th>Int<span class="xbutgl" onclick="toggleXbu()" title="show/hide the per-interval border capacity used — H = Hungary imp/exp (vs JAO flow-based max), B = Bulgaria imp/exp (vs official NTC)"></span></th><th>CET</th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
   document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
@@ -2548,6 +2559,7 @@ ${body}</table></div>
       .then(function(html){
         var doc=new DOMParser().parseFromString(html,'text/html');
         var fresh=doc.querySelector('.content table'), cur=document.querySelector('.content table');
+        if(fresh&&cur&&fresh.dataset.damas==="0"&&cur.dataset.damas!=="0"){dot("#e0a020");return;} // DAMAS answered empty: keep the table we have (amber dot), retry next tick
         if(fresh&&cur){
           // capture old Notif cross-border values so we can FLASH any cell whose value changed (a PI trade cleared)
           var oldNxb={}; cur.querySelectorAll('.nxbcell').forEach(function(c){oldNxb[c.dataset.isp]=c.dataset.v;});
@@ -3193,7 +3205,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/pzu') return json(pzuData(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pzu' || url.pathname === '/') return send(200, 'text/html', pzuPage(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pi') return send(200, 'text/html', piPage(url.searchParams.get('date') || today));
-    if (url.pathname === '/predict') { const t0 = Date.now(); const html = await predictPage(url.searchParams.get('date') || today); const dt = Date.now() - t0; const rows = (html.match(/<tr class=/g) || []).length; if (dt > 3000 || rows < 90) console.error(`[predict] render ${dt} ms, ${rows} rows${rows < 90 ? ' <-- EMPTY/PARTIAL' : ''}`); return send(200, 'text/html', html); }
+    if (url.pathname === '/predict') { const t0 = Date.now(); const html = await predictPage(url.searchParams.get('date') || today); const dt = Date.now() - t0; const rows = (html.match(/<tr class=/g) || []).length; const blank = /data-damas="0"/.test(html); if (dt > 3000 || rows < 90 || blank) console.error(`[predict] render ${dt} ms, ${rows} rows${rows < 90 ? ' <-- EMPTY/PARTIAL' : ''}${blank ? ' <-- DAMAS EMPTY (blank cells)' : ''}`); return send(200, 'text/html', html); }
     if (url.pathname === '/pilearn') return send(200, 'text/html', await piLearnPage(url.searchParams.get('date') || today, url.searchParams.get('frame')));
     if (url.pathname === '/api/fleet') return json(fleetData());
     if (url.pathname === '/api/borders') return json(bordersData());
