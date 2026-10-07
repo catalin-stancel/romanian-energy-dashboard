@@ -189,7 +189,7 @@ function histRowHtml(d, isp, label, last, gate) {
   if (rxb === null) { try { const fl = db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series LIKE 'flow_%'").all(d, isp); let e = 0, i = 0, anyF = false; for (const r of fl) { if (r.series.startsWith('flow_RO_')) e += r.value; else i += r.value; anyF = true; } if (anyF) rxb = e - i; } catch { /* ignore */ } }
   // recorded belt wind speed for that interval (wind_interval COMPOSITE) — same read as the main rows' Wind cell
   let wsRec = null; try { const r = db.prepare("SELECT avg_ws FROM wind_interval WHERE date_ro=? AND isp=? AND station='COMPOSITE'").get(d, isp); if (r) wsRec = r.avg_ws; } catch { /* ignore */ }
-  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="gas">⛽${Math.round(rgas || 0)}</span><span title="other (coal/biomass)">🔥${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0) - (rgas || 0)))}</span></span>`;
+  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="gas">🔥${Math.round(rgas || 0)}</span><span title="coal & biomass">⚫${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0) - (rgas || 0)))}</span></span>`;
   const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
   // weather as it was at that interval's hour
   let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
@@ -2219,7 +2219,7 @@ async function predictPage(date) {
   const prodMix = (prod, so, wi, hy, nu, gs) => { if (prod == null) return '';
     const o = Math.max(0, Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0) - (gs || 0)));
     const s = (ic, v, t) => `<span title="${t}">${ic}${Math.round(v || 0)}</span>`;
-    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}${s('⛽', gs, 'gas')}<span title="other (coal/biomass)">🔥${o}</span></span>`; };
+    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}${s('🔥', gs, 'gas')}<span title="coal & biomass">⚫${o}</span></span>`; };
   // upcoming Real X-B = pure physical identity (Fcst prod − Fcst cons), ~110 MW MAE — kept physical on purpose
   const fcstXBCell = (v) => (v === null ? ''
     : `<span class="xbf" style="font-style:italic;opacity:.75" title="Real cross-border estimate = Fcst prod − Fcst cons (pure physical identity, ~110 MW MAE at the 75-min lead). Compare with the Notif cross border next to it — the GAP between them is the expected imbalance lean. Updates live with the prod/cons nowcasts. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
@@ -2548,7 +2548,7 @@ ${body}</table></div>
       // keepBr: PRESERVE the recorded-at-gate forecast bracket (small.fc-ok/.fc-bad) — overwriting without it
       // made the brackets flicker against the 15s full refresh (user-reported 2026-07-03).
       function keepBr(el){var b=el&&el.querySelector('small.fc-ok,small.fc-bad');return b?' '+b.outerHTML:'';}
-      function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)-(j.gas||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+s('⛽',j.gas,'gas')+'<span title="other (coal/biomass)">🔥'+o+'</span></span>';}
+      function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)-(j.gas||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+s('🔥',j.gas,'gas')+'<span title="coal & biomass">⚫'+o+'</span></span>';}
       var pc=document.querySelector('td[data-rprod="'+j.soldIsp+'"]'); if(pc&&j.prod!=null){var brp=keepBr(pc);pc.innerHTML=Math.round(j.prod).toLocaleString('en-US')+brp+mixHtml(j);if(pc.animate)pc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       var cc=document.querySelector('td[data-rcons="'+j.soldIsp+'"]'); if(cc&&j.cons!=null){var brc=keepBr(cc);cc.innerHTML=Math.round(j.cons).toLocaleString('en-US')+brc;if(cc.animate)cc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       // Cross border Δ (live) for the current interval = interval-AVERAGE real X-B (right of the |) − LIVE Notif cross border
