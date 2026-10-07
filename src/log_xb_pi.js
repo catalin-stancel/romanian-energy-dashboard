@@ -128,12 +128,16 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
   try {
     const senFilter = require('./sen_filter');
     senFilter.ensureTable(db);
-    let sn = 0;
+    const windObs = require('./wind_obs'); windObs.ensureTables(db);
+    let sn = 0, wn = 0;
     for (let i = 0; i < 5; i++) {
       try { const d = await senFilter.fetchSenFilter(); if (d && senFilter.record(db, d, roDateIsp)) sn++; } catch { /* transient */ }
+      // belt wind stations (12–30 s cadence) ride the same 10 s ticks → wind_obs (deduped by observation time)
+      try { wn += await windObs.pollFast(db); } catch { /* transient */ }
       if (i < 4) await new Promise((r) => setTimeout(r, 10000));
     }
     console.log(`sen_live +${sn} snapshots`);
+    try { await windObs.pollSlow(db); windObs.backfillIntervals(db, 3); console.log(`wind_obs +${wn} readings`); } catch (e) { console.error('wind slow/backfill:', e.message); }
     // persist per-interval time-weighted averages to sen_interval (backfills completed intervals + re-finalizes
     // the last few for late SCADA readings) — the "| avg" value saved back in time, for prediction.
     senFilter.ensureIntervalTable(db);

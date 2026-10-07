@@ -8,7 +8,7 @@
 //          E PRODUCT aFRR/mFRR/RR | F DIRECTION up/down | G BID ID | H TECH GROUP | I-L links |
 //          M DIVISIBILITY | N MIN MW | O MAX MW | P PRICE [currency/MWh] | Q CURRENCY | R ACTIVATION TYPE
 const AdmZip = require('adm-zip');
-const { beginImmediate, openDb } = require('./db');
+const { beginImmediate, openDb, logPull } = require('./db');
 
 function parseSharedStrings(xml) {
   const out = [];
@@ -108,8 +108,7 @@ function main() {
     grand += n;
     console.log(`${sheet.name}: ${n} offers`);
   }
-  db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
-    .run('oferte', file, new Date().toISOString(), new Date().toISOString(), grand, null);
+  logPull(db, 'oferte', file, new Date().toISOString(), new Date().toISOString(), grand, null);
   console.log(`total: ${grand} offer rows`);
 }
 

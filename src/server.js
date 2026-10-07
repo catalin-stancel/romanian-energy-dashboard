@@ -15,8 +15,8 @@ const { openDb, roDateIsp } = require('./db');
 
 const PORT = process.env.PORT || 8077;
 const db = openDb();
-// node:sqlite is synchronous: a write waiting on the lock freezes the event loop — and /health with it, which made
-// Render restart the instance in a loop. Jobs keep the 60 s default; the UI never waits more than a moment.
+// node:sqlite is synchronous: a write that waits on the lock freezes the whole event loop. The pullers keep the
+// 60 s default; the UI must never wait more than a moment — its few writes (locks, sen_live) are retried a minute later.
 db.exec('PRAGMA busy_timeout = 1500');
 
 db.exec(`
@@ -172,19 +172,32 @@ function histRowHtml(d, isp, label, last, gate) {
   for (const s of ['damas_sx_rohu', 'damas_sx_robg', 'damas_sx_rors', 'damas_sx_roua', 'damas_sx_romd']) if (m[s] != null) { nxb = (nxb || 0) + m[s]; any = true; }
   for (const s of ['damas_sx_huro', 'damas_sx_bgro', 'damas_sx_rsro', 'damas_sx_uaro', 'damas_sx_mdro']) if (m[s] != null) { nxb = (nxb || 0) - m[s]; any = true; }
   if (!any) nxb = null;
-  const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
   // real production for that interval = sum of settled ENTSO-E generation by type; + the per-source split (.prodmix, follows the toggle)
   const ga = (k) => (m['gen_actual_' + k] ?? null);
   let rprod = null; for (const k of ['solar', 'wind_onshore', 'hydro_reservoir', 'hydro_ror', 'nuclear', 'gas', 'hard_coal', 'lignite', 'biomass', 'B25']) { const v = ga(k); if (v != null) rprod = (rprod || 0) + v; }
-  const rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear');
-  const rprodCell = rprod === null ? '' : f(rprod) + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="other (coal/gas/biomass)">🔥${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0)))}</span></span>`;
+  let rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear');
+  // FALLBACK when ENTSO-E actuals are missing for that day (Transelectrica skipped publishing 2026-10-02..05 entirely):
+  // the interval average of our own SEN recording (sen_live) — same quantities, SCADA-sourced. Tagged in the title.
+  let src = 'ENTSO-E settled';
+  let sen = null; try { sen = db.prepare('SELECT AVG(prod) p, AVG(cons) c, AVG(sold) s, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, COUNT(*) n FROM sen_live WHERE date_ro=? AND isp=? AND prod IS NOT NULL').get(d, isp); if (!sen || !sen.n) sen = null; } catch { /* ignore */ }
+  // PRIMARY = our recording of the live Transelectrica feed (what the main rows showed at the time); ENTSO-E settled only
+  // when the recorder was down (user 2026-10-07: "the real prod data that we record from the live transelectrica feed").
+  if (sen) { rprod = sen.p; rso = sen.so; rwi = sen.wi; rhy = sen.hy; rnu = sen.nu; src = 'recorded live Transelectrica feed (interval average of ' + sen.n + ' readings)'; }
+  else if (rprod !== null) src = 'ENTSO-E settled — our live recording is missing for this interval';
+  // Real X-B: recorded SCADA average → live-recording average → ENTSO-E physical flows (Σ export − Σ import)
+  if (sen && sen.s != null) rxb = -sen.s; // recorded live feed first (sen_interval is the same source, finalized)
+  if (rxb === null) { try { const fl = db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series LIKE 'flow_%'").all(d, isp); let e = 0, i = 0, anyF = false; for (const r of fl) { if (r.series.startsWith('flow_RO_')) e += r.value; else i += r.value; anyF = true; } if (anyF) rxb = e - i; } catch { /* ignore */ } }
+  // recorded belt wind speed for that interval (wind_interval COMPOSITE) — same read as the main rows' Wind cell
+  let wsRec = null; try { const r = db.prepare("SELECT avg_ws FROM wind_interval WHERE date_ro=? AND isp=? AND station='COMPOSITE'").get(d, isp); if (r) wsRec = r.avg_ws; } catch { /* ignore */ }
+  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="other (coal/gas/biomass)">🔥${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0)))}</span></span>`;
+  const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
   // weather as it was at that interval's hour
   let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
   return `<tr class="histrow ${gate ? 'hg' : 'hx'}${last ? ' histrow-last' : ''}" data-pisp="${isp}"><td title="same interval, ${d}"><span class="histlbl">${label}</span></td><td><small>${cetLabel(isp)}</small></td>`
     + `<td>${imb !== null ? dirIcon(imb > 0) + ' ' + f(Math.abs(imb)) : ''}</td>`
     + `<td>${price !== null ? f(price) + ' <small class="cur">lei</small>' : ''}</td>`
-    + `<td>${rprodCell}</td><td>${f(np)}</td><td>${wxTxt}</td><td></td>`
-    + `<td>${f(rc)}</td><td>${f(nc)}</td><td></td>`
+    + `<td>${rprodCell}</td><td>${f(np)}</td><td>${wxTxt}</td><td>${wsRec != null ? '💨' + (+wsRec).toFixed(1) + ' m/s' + (rwi != null ? ' · ' : '') : ''}${rwi != null ? f(rwi) + ' MW' : ''}</td><td></td>`
+    + `<td>${f(sen ? sen.c : rc)}</td><td>${f(nc)}</td><td></td>`
     + `<td>${rxb !== null ? ar(rxb) : ''}</td><td>${nxb !== null ? ar(nxb) : ''}</td><td></td><td></td><td></td>`
     + `<td>${xbd !== null ? dl(xbd) : ''}</td>`
     + `<td>${np !== null && nc !== null && nxb !== null ? dl(np - nc - nxb) : ''}</td></tr>`;
@@ -380,6 +393,8 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
     <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'pilearn' ? 'on' : ''}" href="/pilearn">PI learn</a>
+    <a class="${active === 'map' ? 'on' : ''}" href="/map">Map</a>
+    <a class="${active === 'weather' ? 'on' : ''}" href="/weather">Weather</a>
     ${active === 'predict' ? '<a href="#" id="predtoggle" class="predtgl" title="show/hide the model sign predictions (kept off by default until traders are briefed)" onclick="togglePreds();return false">Predictions: OFF</a>' : ''}
     <a href="#" title="toggle dark/light theme" onclick="toggleTheme();return false">◐</a>
     <span class="userchip"><a href="/logout" title="sign out">⎋</a></span>
@@ -391,6 +406,8 @@ const NAV = (active, date, refreshSec, extras) => `
     <a class="${active === 'pi' ? 'on' : ''}" href="/pi">PI live</a>
     <a class="${active === 'predict' ? 'on' : ''}" href="/predict">Predict</a>
     <a class="${active === 'pilearn' ? 'on' : ''}" href="/pilearn">PI learn</a>
+    <a class="${active === 'map' ? 'on' : ''}" href="/map">Map</a>
+    <a class="${active === 'weather' ? 'on' : ''}" href="/weather">Weather</a>
     <div class="menusep"></div>
     <a href="#" onclick="event.stopPropagation();var p=document.getElementById('colpanel');if(p)p.classList.toggle('open');document.getElementById('mainmenu').classList.remove('open');return false">Columns…</a>
     <a href="#" onclick="toggleTheme();return false">Theme: <span id="thlabel"></span></a>
@@ -443,6 +460,195 @@ const NAV = (active, date, refreshSec, extras) => `
     },{passive:true});
   });</script>
   </div>`;
+
+// Fleet capacity MAP page — the 10km Romania solar+wind grid built from Transelectrica's per-plant registry
+// (tool/build_fleet_grid.js → fleet_grid.json). Utility-scale metered fleet only; prosumers not shown (behind-the-meter).
+function fleetData() { try { return JSON.parse(require('fs').readFileSync(__dirname + '/fleet_grid.json', 'utf8')); } catch { return []; } }
+function bordersData() { try { return JSON.parse(require('fs').readFileSync(__dirname + '/ro_borders.json', 'utf8')); } catch { return []; } }
+// Windy Map Forecast API — client-side, domain-restricted key (safe to embed; abuse is gated by Windy's referrer check).
+const WINDY_KEY = process.env.WINDY_KEY || 'JAVvDf9FKT5nav0zjBgf8bbO9CVgHCBu';
+
+// Per-county TOTAL solar (distributed/prosumer + commercial/utility) for the county choropleth. Each fleet cell is
+// assigned to the smallest-area county polygon that contains its centroid (enclave priority → București resolves out
+// of Ilfov), then solar_pros + solar_util are summed per county. Keyed by the border feature's name so the client can
+// match /api/borders directly. Computed once, cached (the grid + borders are static).
+let _countySolar = null;
+function countySolar() {
+  if (_countySolar) return _countySolar;
+  const cells = fleetData(), borders = bordersData();
+  const bboxArea = (rings) => { let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9; rings.forEach((r) => r.forEach((p) => { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); })); return (x1 - x0) * (y1 - y0); };
+  const pip = (lon, lat, rings) => { let inside = false; for (const ring of rings) for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1]; if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside; } return inside; };
+  const feats = borders.map((f) => ({ name: f.name, rings: f.rings, area: bboxArea(f.rings) })).sort((a, b) => a.area - b.area);
+  const out = {}; feats.forEach((f) => { out[f.name] = { prosumer: 0, utility: 0, total: 0 }; });
+  for (const c of cells) { for (const f of feats) { if (pip(c.lon, c.lat, f.rings)) { out[f.name].prosumer += c.solar_pros || 0; out[f.name].utility += c.solar_util || 0; break; } } }
+  let max = 0; for (const v of Object.values(out)) { v.total = v.prosumer + v.utility; v.prosumer = +v.prosumer.toFixed(1); v.utility = +v.utility.toFixed(1); v.total = +v.total.toFixed(1); if (v.total > max) max = v.total; }
+  _countySolar = { max: +max.toFixed(1), counties: out };
+  return _countySolar;
+}
+function mapPage() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Fleet map</title>${STYLE}</head><body>${NAV('map', null, null, null)}<div class="content">
+<div style="margin:6px 0 10px;font-size:13px;color:var(--fg-muted)">Romania solar + wind — 10&nbsp;km capacity grid · <span id="fsum">…</span><br><small>Utility parks + wind: Transelectrica registry 01.07.2026. Prosumers: ANRE 31.05.2026, by county (urban-weighted, sums to each county's total).</small></div>
+<div style="display:flex;gap:14px;align-items:center;font-size:13px;margin-bottom:8px;flex-wrap:wrap">
+  <span style="display:flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:50%;background:#BA7517;opacity:.7"></span>utility solar</span>
+  <span style="display:flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:50%;background:#D4537E;opacity:.7"></span>prosumer</span>
+  <span style="display:flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:50%;background:#1D9E75;opacity:.7"></span>wind</span>
+  <span style="color:var(--fg-muted)">area ∝ MW · hover for detail</span>
+  <span id="cloudobs" style="color:var(--fg-muted)"></span>
+  <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="mbtn on" data-l="all">all</button><button class="mbtn" data-l="util">utility</button><button class="mbtn" data-l="pros">prosumer</button><button class="mbtn" data-l="wind">wind</button><span style="width:6px"></span><button class="ctog on" data-cl="data">☁ clouds</button><button class="ctog" data-cl="photo">🛰 photo</button></span>
+</div>
+<div id="romap" style="position:relative;width:min(100%,calc((100vh - 240px) * 1.4468));width:min(100%,calc((100dvh - 240px) * 1.4468));margin:0 auto"><img id="cloudphoto" alt="satellite clouds" style="position:absolute;inset:0;width:100%;height:100%;object-fit:fill;opacity:.92;display:none;pointer-events:none;border-radius:4px"><div id="mapsvg" style="position:relative;z-index:1"></div></div>
+<style>.mbtn,.ctog{font:inherit;font-size:12px;padding:3px 11px;border:1px solid var(--border-2);border-radius:6px;background:var(--bg-subtle);color:var(--fg);cursor:pointer}.mbtn.on,.ctog.on{background:var(--yg-yellow);color:var(--yg-black);border-color:var(--yg-yellow)}</style>
+<script>(function(){
+  var W=680,H=470,X=function(lo){return (lo-20)/10*W},Y=function(la){return (48.5-la)/5*H};
+  var CITIES=[{n:"București",la:44.43,lo:26.10},{n:"Constanța",la:44.17,lo:28.65},{n:"Cluj",la:46.77,lo:23.60},{n:"Timișoara",la:45.75,lo:21.23},{n:"Iași",la:47.16,lo:27.59},{n:"Craiova",la:44.33,lo:23.80},{n:"Brașov",la:45.66,lo:25.61},{n:"Galați",la:45.44,lo:28.05}];
+  var DATA=[],BPATH='',CLOUDS=[],STEP=0.4,dataClouds=true,curMode='all';
+  function render(){
+    var mode=curMode;
+    var s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="height:auto;display:block" role="img" aria-label="Romania solar and wind capacity by 10km cell, with county borders and live satellite cloud cover">';
+    s+='<rect x="0.5" y="0.5" width="'+(W-1)+'" height="'+(H-1)+'" fill="none" stroke="var(--border-2)"/>';
+    if(dataClouds)CLOUDS.forEach(function(p){var x=X(p.lon-STEP/2),y=Y(p.lat+STEP/2),w=X(p.lon+STEP/2)-x,h=Y(p.lat-STEP/2)-y;s+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+h.toFixed(1)+'" fill="#8891a0" opacity="'+(p.cloud*0.6).toFixed(2)+'"/>';});
+    s+=BPATH;
+    function dots(key,col,lbl){DATA.forEach(function(d){var v=d[key];if(v>0){var r=Math.sqrt(v)*0.85;if(r<0.4)return;s+='<circle cx="'+X(d.lon).toFixed(1)+'" cy="'+Y(d.lat).toFixed(1)+'" r="'+r.toFixed(1)+'" fill="'+col+'" opacity="0.55"><title>'+lbl+' '+v+' MW ('+d.lat.toFixed(2)+', '+d.lon.toFixed(2)+')</title></circle>';}});}
+    if(mode==='all'||mode==='pros')dots('solar_pros','#D4537E','prosumer');
+    if(mode==='all'||mode==='util')dots('solar_util','#BA7517','utility solar');
+    if(mode==='all'||mode==='wind')dots('wind','#1D9E75','wind');
+    CITIES.forEach(function(c){var x=X(c.lo),y=Y(c.la);s+='<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="2.5" fill="var(--fg-muted)"/><text x="'+(x+5).toFixed(1)+'" y="'+(y+3.5).toFixed(1)+'" font-size="10.5" fill="var(--fg-muted)">'+c.n+'</text>';});
+    s+='</svg>';document.getElementById('mapsvg').innerHTML=s;
+  }
+  Promise.all([fetch('/api/fleet',{cache:'no-store'}).then(function(r){return r.json()}),fetch('/api/borders',{cache:'no-store'}).then(function(r){return r.json()}).catch(function(){return[]})]).then(function(res){
+    DATA=res[0];var B=res[1]||[];
+    B.forEach(function(f){f.rings.forEach(function(r){var d='M';for(var i=0;i<r.length;i++)d+=(i?'L':'')+X(r[i][0]).toFixed(1)+' '+Y(r[i][1]).toFixed(1)+' ';BPATH+='<path d="'+d+'Z" fill="none" stroke="var(--fg-muted)" stroke-width="0.7" opacity="0.4"/>';});});
+    var su=0,sp=0,cw=0;DATA.forEach(function(d){su+=d.solar_util;sp+=d.solar_pros;cw+=d.wind});
+    document.getElementById('fsum').textContent='utility solar '+Math.round(su).toLocaleString()+' · prosumer '+Math.round(sp).toLocaleString()+' · wind '+Math.round(cw).toLocaleString()+' MW · '+DATA.length+' cells';
+    render();
+    document.querySelectorAll('.mbtn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.mbtn').forEach(function(x){x.classList.toggle('on',x===b)});curMode=b.dataset.l;render()};});
+  });
+  function loadClouds(){fetch('/api/clouds',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){CLOUDS=(j&&j.points)||[];var co=document.getElementById('cloudobs');if(co&&j&&j.obs){var age=Math.round((Date.now()-Date.parse(j.obs+':00Z'))/60000);co.textContent='· ☁ sat obs '+j.obs.slice(11,16)+'Z ('+age+' min ago)';}render();}).catch(function(){});}
+  loadClouds(); setInterval(loadClouds,300000);
+  var img=document.getElementById('cloudphoto');
+  function loadPhoto(){img.src='/api/cloudphoto?t='+Date.now();}
+  var ctogs=document.querySelectorAll('.ctog');
+  var btn=function(cl){return [].filter.call(ctogs,function(x){return x.dataset.cl===cl})[0];};
+  function setPhoto(on){btn('photo').classList.toggle('on',on);if(on){loadPhoto();img.style.display='block';}else{img.style.display='none';}}
+  function setData(on){btn('data').classList.toggle('on',on);dataClouds=on;render();}
+  // the two are alternative CLOUD sources (grey data shading vs the satellite photo) — showing both stacked just muddies
+  // the map, so turning one ON turns the other OFF. Either can still be turned off on its own (→ plain fleet map).
+  ctogs.forEach(function(b){b.onclick=function(){var turnOn=!b.classList.contains('on');if(b.dataset.cl==='data'){setData(turnOn);if(turnOn)setPhoto(false);}else{setPhoto(turnOn);if(turnOn)setData(false);}};});
+  setInterval(function(){if(img.style.display!=='none')loadPhoto();},600000);
+})();</script>
+</div></body></html>`;
+}
+
+// Windy-powered LIVE WEATHER page. Two views:
+//  • "Satellite / clouds" (default) = Windy's KEYLESS public embed (embed.windy.com) — full satellite/clouds/radar +
+//    short-forecast timeline, Windy's own map (our fleet dots can't ride on a cross-origin iframe).
+//  • "Fleet + live layers" = Windy Map Forecast API (Leaflet), OUR fleet dots + county borders over Windy's animated
+//    wind/temp/pressure — the only overlays the FREE API key permits (satellite/clouds via API need a paid API plan).
+// Live solar nowcast strip on top of both. Complements /map (our SVG capacity model + EUMETSAT/Open-Meteo overlays).
+function weatherPage() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><title>Live weather</title>${STYLE}<link rel="stylesheet" href="https://unpkg.com/leaflet@1.4.0/dist/leaflet.css"></head><body>${NAV('weather', null, null, null)}<div class="content">
+<div style="display:flex;gap:10px;align-items:center;margin:6px 0 8px;flex-wrap:wrap">
+  <span style="display:flex;gap:6px"><button class="vbtn on" data-v="sat">🛰 Satellite / clouds</button><button class="vbtn" data-v="fleet">◉ Fleet + live layers</button></span>
+  <span style="font-size:12px;color:var(--fg-muted)" id="vhint">Windy's full satellite / clouds / radar + short forecast (drag the bottom timeline). <a href="/map" style="color:var(--info)">→ our capacity map (clouds under fleet)</a></span>
+</div>
+<!-- VIEW A: keyless Windy embed (satellite/clouds/radar) -->
+<div id="wxembed" style="width:100%;height:calc(100vh - 210px);height:calc(100dvh - 210px);min-height:420px;border-radius:6px;overflow:hidden;background:var(--bg-subtle)">
+  <iframe id="wxifr" title="Windy" style="width:100%;height:100%;border:0" loading="lazy"></iframe>
+</div>
+
+<!-- VIEW B: Windy Map Forecast API + our fleet dots -->
+<div id="fleetwrap" style="display:none">
+  <div style="display:flex;gap:14px;align-items:center;font-size:13px;margin-bottom:8px;flex-wrap:wrap">
+    <span style="display:flex;align-items:center;gap:6px"><span style="display:inline-flex;width:58px;height:11px;border-radius:2px;background:linear-gradient(90deg,#FEE08B,#FDAE61,#F46D43,#D53E4F,#9E0142)"></span>county total solar</span>
+    <span style="display:flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:50%;background:#BA7517;border:1.5px solid #fff"></span>commercial (GPS)</span>
+    <span style="display:flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:50%;background:#1D9E75;border:1.5px solid #fff"></span>wind</span>
+    <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+      <span style="display:flex;gap:6px"><button class="mbtn on" data-l="all">all</button><button class="mbtn" data-l="counties">counties</button><button class="mbtn" data-l="util">commercial</button><button class="mbtn" data-l="wind">wind</button></span>
+      <span style="width:6px"></span>
+      <span style="display:flex;gap:6px"><button class="obtn on" data-o="wind">💨 wind</button><button class="obtn" data-o="temp">🌡 temp</button><button class="obtn" data-o="pressure">pressure</button></span>
+      <span style="width:6px"></span>
+      <span style="display:flex;gap:6px"><button class="cltog" data-cl="clouds" title="our satellite cloud-cover feed, overlaid on Windy (coexists with wind)">☁ clouds</button></span>
+    </span>
+  </div>
+  <div id="windy" style="width:100%;height:calc(100vh - 250px);height:calc(100dvh - 250px);min-height:400px;border-radius:6px;overflow:hidden;background:var(--bg-subtle)"></div>
+  <div id="wxerr" style="display:none;margin-top:8px;padding:8px 12px;border-radius:8px;background:var(--tint-neg);color:var(--neg);font-size:12.5px"></div>
+  <div style="margin-top:6px;font-size:11.5px;color:var(--fg-muted)"><b>💨/🌡/pressure</b> = Windy's animated forecast (free API key → those three only). <b>☁ clouds</b> = our own satellite cloud-cover feed overlaid on top (Windy's cloud layer needs a paid API plan). Full animated satellite/clouds/radar → the 🛰 view above; clouds under fleet on <a href="/map" style="color:var(--info)">/map</a>.</div>
+</div>
+
+<style>.mbtn,.obtn,.vbtn,.cltog{font:inherit;font-size:12px;padding:3px 11px;border:1px solid var(--border-2);border-radius:6px;background:var(--bg-subtle);color:var(--fg);cursor:pointer}.mbtn.on,.obtn.on,.vbtn.on,.cltog.on{background:var(--yg-yellow);color:var(--yg-black);border-color:var(--yg-yellow)}#windy .leaflet-control-attribution{font-size:9px}</style>
+<script src="https://unpkg.com/leaflet@1.4.0/dist/leaflet.js"></script>
+<script src="https://api.windy.com/assets/map-forecast/libBoot.js"></script>
+<script>(function(){
+  // ---- view toggle ----
+  var EMBED='https://embed.windy.com/embed2.html?lat=45.85&lon=25.0&detailLat=45.85&detailLon=25.0&zoom=7&level=surface&overlay=satellite&product=satellite&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1';
+  var ifr=document.getElementById('wxifr'); ifr.src=EMBED; // satellite embed loads immediately (the view they asked for)
+  var apiInited=false;
+  function setView(v){
+    var sat=v==='sat';
+    document.getElementById('wxembed').style.display=sat?'block':'none';
+    document.getElementById('fleetwrap').style.display=sat?'none':'block';
+    document.getElementById('vhint').innerHTML=sat
+      ? 'Windy\\'s full satellite / clouds / radar + short forecast (drag the bottom timeline). <a href="/map" style="color:var(--info)">→ our capacity map (clouds under fleet)</a>'
+      : 'Our solar + wind fleet over Windy\\'s live wind / temp / pressure forecast (free API key — clouds/satellite need a paid API plan).';
+    if(!sat){ if(!apiInited){apiInited=true;initApi();} else if(theMap){setTimeout(function(){theMap.invalidateSize()},60);} }
+  }
+  document.querySelectorAll('.vbtn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.vbtn').forEach(function(x){x.classList.toggle('on',x===b)});setView(b.dataset.v)};});
+
+  // ---- Windy API map (lazy) ----
+  var COLORS={solar_util:'#BA7517',solar_pros:'#D4537E',wind:'#1D9E75'};
+  var groups={}, DATA=[], curMode='all', theMap=null;
+  function fail(m){var e=document.getElementById('wxerr');if(e){e.style.display='block';e.textContent=m;}}
+  function initApi(){
+    if(typeof windyInit!=='function'){fail('Could not load the Windy library (network blocked?). Use the 🛰 view above, or /map.');return;}
+    windyInit({key:'${WINDY_KEY}',verbose:false,lat:45.85,lon:25.0,zoom:7,overlay:'wind'},function(w){
+      var map=w.map, store=w.store; theMap=map;
+      document.querySelectorAll('.obtn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.obtn').forEach(function(x){x.classList.toggle('on',x===b)});try{store.set('overlay',b.dataset.o)}catch(e){fail('Overlay "'+b.dataset.o+'" not available on this key.')}};});
+      // OUR cloud overlay (Windy's cloud layer is paywalled on this key) — /api/clouds satellite field as translucent
+      // white cells in a dedicated pane above Windy's wind overlay but below the fleet dots. Independent toggle.
+      map.createPane('ourClouds'); var cp=map.getPane('ourClouds'); cp.style.zIndex=390; cp.style.pointerEvents='none';
+      var cloudLayer=L.layerGroup(), cloudTimer=null;
+      function drawClouds(){fetch('/api/clouds',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){cloudLayer.clearLayers();var st=(j&&j.step)||0.4;((j&&j.points)||[]).forEach(function(p){if(p.cloud<0.05)return;var b=[[p.lat-st/2,p.lon-st/2],[p.lat+st/2,p.lon+st/2]];cloudLayer.addLayer(L.rectangle(b,{pane:'ourClouds',stroke:false,fill:true,fillColor:'#ffffff',fillOpacity:Math.min(0.7,p.cloud*0.75),interactive:false}));});}).catch(function(){});}
+      var clBtn=document.querySelector('.cltog');
+      if(clBtn)clBtn.onclick=function(){var on=!clBtn.classList.contains('on');clBtn.classList.toggle('on',on);if(on){cloudLayer.addTo(map);drawClouds();cloudTimer=setInterval(drawClouds,300000);}else{map.removeLayer(cloudLayer);if(cloudTimer){clearInterval(cloudTimer);cloudTimer=null;}}};
+      Promise.all([
+        fetch('/api/fleet',{cache:'no-store'}).then(function(r){return r.json()}),
+        fetch('/api/borders',{cache:'no-store'}).then(function(r){return r.json()}).catch(function(){return[]}),
+        fetch('/api/county_solar',{cache:'no-store'}).then(function(r){return r.json()}).catch(function(){return{max:0,counties:{}}})
+      ]).then(function(res){
+        DATA=res[0]||[]; var B=res[1]||[]; var CS=res[2]||{max:0,counties:{}};
+        // faint white county outlines (always on, for geographic context)
+        var bord=L.layerGroup();
+        B.forEach(function(f){f.rings.forEach(function(r){bord.addLayer(L.polyline(r.map(function(p){return [p[1],p[0]]}),{color:'#ffffff',weight:1,opacity:0.4,interactive:false}))});});
+        bord.addTo(map);
+        // COUNTY CHOROPLETH — fill each county by TOTAL installed solar (distributed/prosumer + commercial). Distributed
+        // PV has no precise coords, so county resolution is the honest level. Own pane below clouds(390)/dots(400).
+        map.createPane('choro'); map.getPane('choro').style.zIndex=250;
+        var choro=L.layerGroup();
+        function solColor(t){return t<0.2?'#FEE08B':t<0.4?'#FDAE61':t<0.6?'#F46D43':t<0.8?'#D53E4F':'#9E0142';}
+        var mx=CS.max||1;
+        B.forEach(function(f){var c=(CS.counties&&CS.counties[f.name])||{total:0,utility:0,prosumer:0};var col=solColor(mx>0?c.total/mx:0);
+          f.rings.forEach(function(r){var poly=L.polygon(r.map(function(p){return [p[1],p[0]]}),{pane:'choro',stroke:false,fillColor:col,fillOpacity:0.62});
+            poly.bindTooltip('<b>'+f.name+'</b><br>'+Math.round(c.total)+' MW total solar<br>'+Math.round(c.utility)+' commercial + '+Math.round(c.prosumer)+' distributed',{sticky:true});
+            choro.addLayer(poly);});});
+        groups.counties=choro; choro.addTo(map);
+        // DOTS at GPS — commercial (utility) plants + wind. Kept as points because a cloud at that exact coordinate has
+        // an outsized, localized impact on these big concentrated sources.
+        ['solar_util','wind'].forEach(function(key){
+          var g=L.layerGroup(); var lbl=key==='solar_util'?'commercial solar':'wind';
+          DATA.forEach(function(d){var v=d[key];if(v>0){var rad=Math.max(3,Math.sqrt(v)*1.2);
+            // white halo + near-solid saturated fill so dots read on Windy's dark terrain AND its colored overlays
+            g.addLayer(L.circleMarker([d.lat,d.lon],{radius:rad,color:'#ffffff',weight:1.6,fillColor:COLORS[key],fillOpacity:0.95,opacity:0.95}).bindTooltip(lbl+' '+v+' MW',{direction:'top'}));}});
+          groups[key]=g; g.addTo(map);
+        });
+        applyMode(); setTimeout(function(){map.invalidateSize(); map.fitBounds([[43.6,20.2],[48.3,29.8]],{padding:[6,6]});},60);
+      });
+      document.querySelectorAll('.mbtn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.mbtn').forEach(function(x){x.classList.toggle('on',x===b)});curMode=b.dataset.l;applyMode()};});
+    });
+  }
+  function applyMode(){if(!theMap)return;var show={all:['counties','solar_util','wind'],counties:['counties'],util:['solar_util'],wind:['wind']}[curMode]||[];['counties','solar_util','wind'].forEach(function(k){var g=groups[k];if(!g)return;if(show.indexOf(k)>=0){if(!theMap.hasLayer(g))g.addTo(theMap);}else{if(theMap.hasLayer(g))theMap.removeLayer(g);}});}
+})();</script>
+</div></body></html>`;
+}
 
 // YellowGrid Design System (data/design/colors_and_type.css) — brand yellow as accent over a
 // themeable base. DARK is the default theme; html[data-theme='light'] restores the original
@@ -581,6 +787,8 @@ tr.hx .histlbl{background:var(--yg-yellow);color:var(--yg-black)}
 .fc-s{color:var(--ic-s)} .fc-d{color:var(--ic-d)}
 /* SCADA generation split, inline after the Real prod total (| separator) */
 .prodmix{font-size:10px;font-weight:400;opacity:.85}
+.wonset{color:var(--neg);font-size:11px;white-space:nowrap}
+.wmw{font-weight:600}
 .prodmix span{margin-right:6px;white-space:nowrap}
 html.mix-off .prodmix{display:none}
 /* RES generation forecast (solar/wind MW) under the weather in the Weather column */
@@ -1134,17 +1342,18 @@ const DAMAS_BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg
 // Node's fetch has NO timeout — transelectrica.ro intermittently stops responding to server-to-server requests
 // (black-holes the connection), which would hang the awaiting page (/predict, /pilearn) FOREVER. Wrap every live
 // fetch so a dead host ABORTS (→ the caller's .catch → cached/last-good data) instead of freezing the request.
-// The body is read INSIDE the timer too, so a headers-then-stalled-body can't slip past.
 async function fetchT(url, opts = {}, ms = 8000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), ms);
   try {
     const r = await fetch(url, { ...opts, signal: ac.signal });
-    return { ok: r.ok, status: r.status, text: await r.text() };
+    return { ok: r.ok, status: r.status, text: await r.text() }; // body read UNDER the timer — a headers-then-stall can't hang us
   } finally { clearTimeout(t); }
 }
-// Per-endpoint circuit breakers for the flaky live host: after a failure, skip that endpoint for a cooldown and
-// serve last-good/cache immediately (→ /predict stays fast during an outage), then one request re-probes.
+// Circuit breaker for the flaky transelectrica.ro live endpoints. Once a fetch fails we STOP hitting that endpoint
+// for a cooldown and serve last-good/cached immediately → /predict stays fast during an outage instead of eating the
+// timeouts on every load; after the cooldown one request probes again. Separate breakers per endpoint (sen-grafic and
+// sen-filter fail independently — don't skip a healthy one because the other is down).
 function makeBreaker(cooldownMs = 45000) { let until = 0; return { down: () => Date.now() < until, markDown: () => { until = Date.now() + cooldownMs; }, markUp: () => { until = 0; } }; }
 const graficBrk = makeBreaker();   // liveSEN (SEN-grafic feed)
 const filterBrk = makeBreaker();   // liveSenFilter (sen-filter homepage feed)
@@ -1215,11 +1424,16 @@ async function liveSEN(date, maxAge = 45000) {
 // live UI and RECORDS every distinct snapshot (decoded core + full raw) to sen_live for prediction.
 const senFilter = require('./sen_filter');
 try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', e.message); }
+// ---- real-time wind observations (belt PWS 12 s + METAR + ANM) for the Predict "Wind" column — tool/wind_obs.js
+const windObs = require('./wind_obs');
+try { windObs.ensureTables(db); } catch (e) { console.error('wind tables:', e.message); }
 // live sign predictor (P(surplus) per upcoming interval). Model trained on settled history, cached + retrained hourly.
 const signModel = require('./sign_model');
 const resModel = require('./res_model');
+const spreadModel = require('./spread_model');
 let signCache = { model: null, trainedAt: null, inlineAt: 0 };
 let resCache = { model: null, trainedAt: null, inlineAt: 0 };
+let spreadCache = { model: null, trainedAt: null, inlineAt: 0 };
 // Load a precomputed model from model_cache (written by tool/train_models.js, every ~30min) — NEVER train on the
 // request/event-loop path when a fresh precompute exists. Fall back to inline train (hourly) only if the job is down.
 function loadModel(name, cache, trainFn) {
@@ -1235,6 +1449,16 @@ function loadModel(name, cache, trainFn) {
 }
 function getSignModel() { return loadModel('sign', signCache, signModel.train); }
 function getResModel() { return loadModel('res', resCache, resModel.train); }
+function getSpreadModel() { return loadModel('spread', spreadCache, spreadModel.train); }
+// Live Ê[spread] rows for a date, briefly cached (features move on settled publications ~15min; 30s is plenty)
+let spreadFcCache = { at: 0, date: null, data: null };
+function getSpreadFc(date) {
+  if (spreadFcCache.date === date && Date.now() - spreadFcCache.at < 30000) return spreadFcCache.data;
+  let data = null;
+  try { const m = getSpreadModel(); if (m) data = spreadModel.forecastDay(db, m, date); } catch (e) { console.error('spread fc:', e.message); }
+  spreadFcCache = { at: Date.now(), date, data };
+  return data;
+}
 // Live regime anchors as of a publication-safe cutoff (= decision time for all upcoming intervals; matches training):
 //   persist = freshest settled imbalance; fracsurp = surplus-fraction of the last FRAC_W settled; netting = export−import.
 function liveRegime(cutoffMs) {
@@ -1278,6 +1502,10 @@ const _nbPi2 = db.prepare('SELECT isp, commercial FROM xb_pi_snap WHERE date_ro=
 // stays LIVE; once the gate advances past it (it becomes ISP+4, untradeable) its prediction freezes + is RECORDED
 // (append-only, lock-once) so it shows vs the realized outcome + can be scored. The gate row is NEVER locked.
 try { db.exec('CREATE TABLE IF NOT EXISTS sign_lock(date_ro TEXT, isp INTEGER, p REAL, sign TEXT, conf INTEGER, locked_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('sign_lock table:', e.message); }
+// Ê[spread] records, frozen at the 75-min trade gate (the price/profit project's live scorecard — sign_lock pattern).
+// es = Ê[imb price − PZU] RON/MWh at lock; pzu_ref = the PZU used (settlement reference at decision time);
+// realized_s filled by scoreSpreadLocks once the interval's settled prices publish.
+try { db.exec('CREATE TABLE IF NOT EXISTS spread_lock(date_ro TEXT, isp INTEGER, es REAL, pzu_ref REAL, lead INTEGER, locked_at TEXT, realized_s REAL, scored_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('spread_lock table:', e.message); }
 // PANIC / big-PI-move log: flag + RECORD upcoming tradeable intervals being repositioned hard, so we can finally
 // VALIDATE the desk's "a big PI trade flips the state" intuition (so far unconfirmed: big moves mostly CONFIRM the
 // state; flips n≈13, PI pointed the right way only ~38%). Observational only — no P adjustment until the log earns it.
@@ -1346,13 +1574,46 @@ function scorePanics() {
     if (v) set.run(v.value > 0 ? 'S' : 'D', new Date().toISOString(), r.date_ro, r.isp);
   }
 }
+// Freeze Ê[spread] for the interval that JUST became untradeable (old gate row → ISP+4), same rule as sign_lock.
+function lockDueSpread() {
+  const ni = roDateIsp(new Date());
+  const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
+  const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN;
+  const has = db.prepare('SELECT 1 FROM spread_lock WHERE date_ro=? AND isp=?');
+  const ins = db.prepare('INSERT OR IGNORE INTO spread_lock(date_ro,isp,es,pzu_ref,lead,locked_at) VALUES (?,?,?,?,?,?)');
+  let fc = null;
+  for (const { isp, ts } of dayTimestamps(ni.date)) {
+    if (isp < spreadModel.WIN_FROM || isp > spreadModel.WIN_TO) continue;
+    const Tms = new Date(ts).getTime();
+    if (Tms >= gateMs || Tms < gateMs - 15 * signModel.MIN) continue; // only the row leaving the tradeable set
+    if (has.get(ni.date, isp)) continue;                              // lock once
+    if (!fc) { fc = getSpreadFc(ni.date); if (!fc) return; }
+    const r = fc.rows.get(isp); if (!r) continue;
+    ins.run(ni.date, isp, +r.es.toFixed(1), +r.pzu.toFixed(2), r.lead, new Date().toISOString());
+  }
+}
+// Fill realized S onto locked records once the settled prices publish. Settlement mirrors the model target:
+// realized_s = P_imb(sign-aligned) − pzu_ref(recorded at lock — the decision-time reference, same as bets scoring).
+function scoreSpreadLocks() {
+  const rows = db.prepare('SELECT date_ro, isp, pzu_ref FROM spread_lock WHERE realized_s IS NULL').all(); if (!rows.length) return;
+  const set = db.prepare('UPDATE spread_lock SET realized_s=?, scored_at=? WHERE date_ro=? AND isp=?');
+  const get = db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series IN ('imb_price_deficit','imb_price_excedent','damas_est_sys_imbalance')");
+  for (const r of rows) {
+    const m = {}; for (const x of get.all(r.date_ro, r.isp)) m[x.series] = x.value;
+    if (m.imb_price_deficit == null || m.imb_price_excedent == null || m.damas_est_sys_imbalance == null) continue;
+    const pImb = m.damas_est_sys_imbalance < 0 ? m.imb_price_deficit : m.imb_price_excedent;
+    set.run(+(pImb - r.pzu_ref).toFixed(1), new Date().toISOString(), r.date_ro, r.isp);
+  }
+}
 setInterval(() => { try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { console.error('sign loop:', e.message); } }, 60000);
 try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { /* ignore at startup */ }
+setInterval(() => { try { lockDueSpread(); scoreSpreadLocks(); } catch (e) { console.error('spread loop:', e.message); } }, 60000);
+try { lockDueSpread(); scoreSpreadLocks(); } catch (e) { /* ignore at startup */ }
 // index for per-hour weather lookups (weather PK starts with `point`, so ts_utc filters were full scans ~230ms)
 try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } catch (e) { /* table may not exist yet */ }
 let senFilterCache = { at: 0, data: null };
 let _senLiveAt = { at: 0, v: 0 };
-function lastSenLiveAt() { // cached 30 s: when did the xb_pi job last store a sen_live row
+function lastSenLiveAt() { // cached 30 s: when did the logger last store a sen_live row
   if (Date.now() - _senLiveAt.at < 30000) return _senLiveAt.v;
   try { const r = db.prepare("SELECT MAX(pulled_at) p FROM sen_live WHERE date_ro=?").get(roDateIsp(new Date()).date); _senLiveAt = { at: Date.now(), v: r && r.p ? Date.parse(r.p) : 0 }; } catch { _senLiveAt = { at: Date.now(), v: 0 }; }
   return _senLiveAt.v;
@@ -1363,8 +1624,8 @@ async function liveSenFilter(maxAge = 10000) {
   const d = await senFilter.fetchSenFilter().catch(() => null);
   if (d) {
     filterBrk.markUp(); senFilterCache = { at: Date.now(), data: d };
-    // the xb_pi job records sen_live every minute; the UI only steps in when that looks dead (no row for 3 min) —
-    // otherwise two processes fight for the write lock on every poll.
+    // the 24/7 logger (log_xb_pi.js) records sen_live every ~10 s; the UI only steps in when that feed looks dead
+    // (no row for 3 min) — otherwise two processes fight for the write lock on every poll.
     if (Date.now() - lastSenLiveAt() > 180000) { try { senFilter.record(db, d, roDateIsp); } catch (e) { console.error('sen_live record:', e.message); } }
     return d;
   }
@@ -1624,6 +1885,9 @@ function lockDueProd() {
   }
 }
 setInterval(() => { try { lockDueProd(); } catch (e) { console.error('prod lock:', e.message); } }, 60000);
+// wind forecast frozen at the same 75-min gate (wind_lock) — settled rows show realized MW + the recorded forecast
+setInterval(() => { try { windObs.lockDue(db, dayTimestamps); } catch (e) { console.error('wind lock:', e.message); } }, 60000);
+try { windObs.lockDue(db, dayTimestamps); } catch { /* startup */ }
 try { lockDueProd(); } catch { /* startup */ }
 
 // HU-border empirical capacity envelope: rolling 60-day p99.5 of the total commercial exchange per direction.
@@ -1732,16 +1996,39 @@ async function predictPage(date) {
       for (const [h, b] of base) myFc.set(h, { solar: b.solar != null ? b.solar * solarScale : null, wind: b.wind != null ? b.wind * windScale : null });
     }
   } catch { /* weather/model may be absent */ }
-  // RES forecast cell: ENTSO-E (E) line + my weather-model (M) line, M coloured vs ENTSO-E (green=I expect more, red=less)
-  const resCell = (e, m) => {
+  // ★ LIVE-ANCHORED SOLAR FORECAST (clear-sky persistence) per upcoming interval — replaces the weak weather-model (M)
+  // solar for TODAY's future intervals. Take the current metered utility solar (FOTO), hold today's cloud level, and
+  // advance only the deterministic clear-sky geometry: fc(isp) = FOTO_now × Σ(util·cs(isp)) / Σ(util·cs(now)). Backtested
+  // (solar_fc_backtest.js) −68%/−77% RMSE vs naive persistence at the +1h/+2h sunset ramp; needs no weather feed.
+  const solFc = new Map();
+  if (date === nowInfo.date) {
+    try {
+      const foto = db.prepare('SELECT solar FROM sen_live WHERE solar IS NOT NULL ORDER BY ts_ms DESC LIMIT 1').get();
+      if (foto && foto.solar > 20) {
+        const cells = fleetData(); const { csFactor } = require('./solar_now');
+        const csAt = (d) => { let u = 0; for (const c of cells) u += (c.solar_util || 0) * csFactor(c.lat, c.lon, d); return u; };
+        const csNow = csAt(new Date());
+        if (csNow > 0.5) for (const { isp, ts } of dayTimestamps(date)) { if (isp < nowInfo.isp) continue; const cs = csAt(new Date(ts)); if (cs > 0.01) solFc.set(isp, foto.solar * cs / csNow); }
+      }
+    } catch { /* sen_live or fleet_grid absent → column keeps the weather-model */ }
+  }
+  // RES forecast cell: ENTSO-E (E) line + a second line = the live-anchored forecast (F) when available, else my
+  // weather-model (M). Solar coloured vs ENTSO-E (green = I expect more, red = less).
+  const resCell = (e, m, f) => {
     const r0 = (v) => (v != null ? Math.round(v) : null);
-    const eS = e ? r0(e.solar) : null, eW = e ? r0(e.wind) : null, mS = m ? r0(m.solar) : null, mW = m ? r0(m.wind) : null;
+    const eS = e ? r0(e.solar) : null, eW = e ? r0(e.wind) : null, mW = m ? r0(m.wind) : null;
+    const fS = f != null ? r0(f) : null;                       // live-anchored forecast (preferred)
+    const mS = fS != null ? fS : (m ? r0(m.solar) : null);      // fall back to weather-model solar
     if (eS == null && eW == null && mS == null && mW == null) return '';
     const col = (mv, ev) => (mv == null || ev == null ? '' : (mv > ev + 50 ? ' class="pos"' : mv < ev - 50 ? ' class="neg"' : ''));
+    const useF = fS != null;
     const arr = solarScale > 1.05 ? '↑' : solarScale < 0.95 ? '↓' : '';
-    const mTip = `my weather-model forecast (MW): base curve × today's intraday factor (☀️×${solarScale.toFixed(2)}, 💨×${windScale.toFixed(2)}) measured from how today is running vs the base. Coloured vs ENTSO-E (green = I expect more, red = less).`;
+    const lbl = useF ? 'F' : 'M' + arr;
+    const tip = useF
+      ? 'live-anchored solar forecast (F): the current metered utility solar (FOTO) held at today&#39;s cloud level and advanced by clear-sky geometry. Backtested −68%/−77% RMSE vs naive persistence at the +1h/+2h sunset ramp. Coloured vs ENTSO-E.'
+      : `my weather-model forecast (MW): base curve × today's intraday factor (☀️×${solarScale.toFixed(2)}, 💨×${windScale.toFixed(2)}) measured from how today is running vs the base. Coloured vs ENTSO-E (green = I expect more, red = less).`;
     const eLine = (eS != null || eW != null) ? `<div class="resfc" title="ENTSO-E A69 forecast (MW)"><span class="rlbl">E</span>${eS != null ? ' ☀️' + eS : ''}${eW != null ? ' 💨' + eW : ''}</div>` : '';
-    const mLine = (mS != null || mW != null) ? `<div class="resfc" title="${mTip}"><span class="rlbl">M${arr}</span>${mS != null ? ` <span${col(mS, eS)}>☀️${mS}</span>` : ''}${mW != null ? ` <span${col(mW, eW)}>💨${mW}</span>` : ''}</div>` : '';
+    const mLine = (mS != null || mW != null) ? `<div class="resfc" title="${tip}"><span class="rlbl">${lbl}</span>${mS != null ? ` <span${col(mS, eS)}>☀️${mS}</span>` : ''}${mW != null ? ` <span${col(mW, eW)}>💨${mW}</span>` : ''}</div>` : '';
     return eLine + mLine;
   };
   const signLock = new Map(); // locked (frozen-at-gate) sign forecast per interval — shown glued-right in the Imbalance cell
@@ -1771,6 +2058,30 @@ async function predictPage(date) {
   let liveAvg = null, liveAvgN = 0;
   if (liveIsp > 0) { const tw = intervalTWA(date, liveIsp); liveAvg = tw.avg; liveAvgN = tw.n; }
   if (liveAvg === null && liveSold !== null) liveAvg = -liveSold; // seed with the live value so it never blanks
+
+  // --- Wind column: live belt stations + fleet MW (live row), interval averages (settled), corrected forecast (forward)
+  const WD = windObs.pageData(db, date, nowInfo);
+  const windCell = (isp, tsMs) => {
+    const f1 = (v) => (v == null ? '' : (+v).toFixed(1));
+    const lk = WD.lock.get(isp);
+    // bracket = what was PREDICTED for this interval at the 75-min gate (wind_lock): ~hub-height speed · fleet MW, so the
+    // delta vs the realized values on the left is visible per interval; green/red judged on the MW (within 100 MW)
+    const br = (mw) => (lk && lk.mw_fc != null && mw != null ? ` <small class="${Math.abs(mw - lk.mw_fc) <= 100 ? 'fc-ok' : 'fc-bad'}" title="predicted at the 75-min gate: ${lk.ws_fc != null ? '~' + f1(lk.ws_fc) + ' m/s hub-height (ICON-EU 120 m at the farms — the stations on the left read 10 m, ~half of it: compare the movement, not the level) · ' : ''}${fmt(lk.mw_fc)} MW fleet — realized − predicted = ${mw - lk.mw_fc >= 0 ? '+' : ''}${Math.round(mw - lk.mw_fc)} MW (green = within 100 MW)">(${lk.ws_fc != null ? '~' + f1(lk.ws_fc) + ' m/s · ' : ''}${fmt(lk.mw_fc)})</small>` : '');
+    if (nowInfo.date === date && isp === liveIsp) {
+      const tip = WD.stations.map((s) => `${s.name} ${f1(s.ws)}${s.gust != null ? '/' + f1(s.gust) : ''} m/s${s.dir != null ? ' ' + Math.round(s.dir) + '°' : ''} (${Math.round(s.age)} min)`).join(' · ').replace(/"/g, '&quot;');
+      const tr = WD.fleet.trend10, trS = tr == null ? '' : ` <small class="${tr >= 0 ? 'pos' : 'neg'}" title="fleet change over the last 10 min">${tr >= 0 ? '+' : ''}${Math.round(tr)}</small>`;
+      const on = WD.onset && WD.onset.flag ? ` <b class="wonset" title="wind starting: belt stations ${WD.onset.ago}→${WD.onset.now} m/s in 3 h while the fleet is still low">⚠ starting</b>` : '';
+      return `<span class="wlive" title="${tip}">${WD.comp != null ? '💨' + f1(WD.comp) + ' m/s' : '<small>…</small>'}</span> · <span class="wmw">${WD.fleet.liveMw != null ? fmt(WD.fleet.liveMw) + ' MW' : ''}${trS}</span>${on}${br(WD.fleet.liveMw)}`;
+    }
+    const past = WD.fleet.per.get(isp);
+    if (past && (nowInfo.date !== date || isp < liveIsp)) {
+      const c = WD.ivComp.get(isp);
+      return `${c != null ? '💨' + f1(c) + ' m/s · ' : ''}${fmt(past.mw)} MW${br(past.mw)}`;
+    }
+    const mw = WD.fc.get(isp), ws = WD.wsF(tsMs);
+    if (mw == null && ws == null) return '';
+    return `<span class="wfwd" data-wisp="${isp}" style="font-style:italic;opacity:.75" title="forward wind: ~hub-height ICON-EU 120 m at the 5 farm clusters (m/s) · ~fleet MW = ENTSO-E intraday + live error correction (decay 0.97/ISP)">${ws != null ? '~' + f1(ws) + ' m/s · ' : ''}${mw != null ? '~' + fmt(mw) + ' MW' : ''}</span>`;
+  };
 
   // --- Nowcast prediction of real prod/cons for upcoming (not-yet-settled) intervals ---
   // pred = notified + phi[h]*recentDev, recentDev = mean(real-notified) over the last 3 settled
@@ -1831,9 +2142,11 @@ async function predictPage(date) {
   const COLS = [
     { h: 'Imbalance', u: 'MWh', help: 'Estimated system imbalance. SETTLED intervals: the published value — S = surplus / system long → low or negative price, D = deficit / system short → high price. UPCOMING intervals (~italic, user-spec 2026-07-03): the PHYSICAL-IDENTITY lean = (Fcst Real X-B − Notif X-B)/4 [MWh] — how far predicted physics sits from the notified paper; updates live with the prod/cons forecasts. Hidden together with the X-B estimate toggle. (The old S/D% sign forecast is hidden from display but keeps recording in the background for a future accuracy comparison against this lean.)' },
     { h: 'Price', u: 'RON', help: 'Estimated imbalance price for the interval [RON/MWh].' },
+    { h: 'Sprd fc', u: 'RON', help: 'SHADOW forecast (recording since 2026-08-19, not yet driving positions): expected settlement spread Ê[imbalance price − PZU] in RON/MWh, from the price/profit model (26-month blocked CV: 269 RON/MWh avg on gate leads, 60% direction hit, 1 losing month). POSITIVE (green) → imbalance price expected ABOVE PZU → a surplus position (BUY PZU ▸ SELL BAL) earns; NEGATIVE (red) → expected BELOW PZU → a deficit position (SELL PZU ▸ BUY BAL) earns. ● marks |Ê|>200 (validated stronger tier: 393 RON/MWh @ 59% of intervals). Live italic on tradeable intervals (updates ~30s); frozen at the 75-min gate into a locked record; settled rows show the locked call with the realized spread in brackets (green = direction matched). Anchored to settled publications ~40 min behind — an early-warning read, not a promise.' },
     { h: 'Real prod', u: 'MW', mix: true, help: 'Live national generation from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute, all plant types included). Upcoming intervals (~italic) show a 50/50 BLEND of two routes: schedule-consistent (Fcst cons + the cross-border schedule) and curve-anchored (Notif prod + the hourly real−notif deviation curve — midday −700 MW solar over-scheduling, evening/night +200..450 — + today’s running anomaly). Formula (user-spec 2026-07-02): FIXED Notif prod (the D-1 plan — its planned increases/decreases carry through 1:1) + the day/evening deviation curve (solar-aware: deviation deepens ~0.30 MW per MW of solar forecast above the hourly norm; interpolated smoothly) + an intraday correction from REALISED production only (last-4-interval anomaly, trend-projected ≤2h, reading our ~1-min-fresh SEN recorder). No consumption/schedule leg in the level. ~93 MW MAE at 15-min lead, ~130 at 75-min. Covers today + tomorrow.' },
     { h: 'Notif prod', u: 'MW', help: 'Notified (scheduled) generation, the BRP plan published a day ahead. The 💧 marker flags a scheduled START/STOP in the DISPATCHABLE plan (Notif prod − solar/wind D-1 forecast, step ≥150 MW) — most likely hydro dispatching on the price curve (validated: hydro delivers such steps in 59% of cases; e.g. 2026-07-02 15:00 plan +529 → hydro +406). NOTE: notified production sits on a different basis than SEN metered, so read Prod Δ as a TREND; the live Real-prod nowcast corrects today’s gap.' },
-    { h: 'Weather', u: '100m km/h', res: true, help: 'DEFAULT: Romania weather — sky icon (cloud) + 💨 wind speed at 100m (km/h), ensemble mean across 4 RO regions. Flip the switch to show the RES generation FORECAST instead (MW): E = ENTSO-E A69; M = my weather-model (intraday-adjusted, coloured vs E — green = I expect more, red = less). ☀️ solar / 💨 wind. Toggle is per-device, default off.' },
+    { h: 'Weather', u: '100m km/h', res: true, help: 'DEFAULT: Romania weather — sky icon (cloud) + 💨 wind speed at 100m (km/h), ensemble mean across 4 RO regions. Flip the switch to show the RES generation FORECAST instead (MW): E = ENTSO-E A69; F = my live-anchored solar forecast (current metered FOTO held at today\'s cloud level, advanced by clear-sky geometry — backtested −68%/−77% RMSE vs naive persistence at the +1h/+2h sunset ramp; shown for today\'s upcoming intervals) — falls back to M (weather-model) otherwise. Solar coloured vs E (green = I expect more, red = less). ☀️ solar / 💨 wind. Toggle is per-device, default off.' },
+    { h: 'Wind', u: 'm/s · MW', help: 'LIVE row (refreshes every 8 s): 💨 belt wind speed = mean of the Dobrogea stations that stream every 12–30 s (Săcele near Fântânele-Cogealac, Pantelimon, Sarichioi, Beidaud, Mihai Viteazu + the Kogălniceanu/Tulcea airport METARs; hover for each), then the fleet output (Transelectrica EOLIAN MW) with its 10-min change. ⚠ starting = the stations rose ≥1.5 m/s in 3 h while the fleet is still low — in the 6-month test they led ramp onsets by 1–4 h. SETTLED rows: interval-average station wind · realized fleet MW, plus the forecast recorded at the 75-min gate in brackets (green = within 100 MW). UPCOMING rows (italic): ~hub-height wind (ICON-EU 120 m at the 5 big farm clusters) · ~fleet MW = ENTSO-E intraday forecast + live error correction (60-day MAE 69 vs 128 at the 75-min gate). NB: ground stations read 10 m rooftop wind, ~½ of hub-height — read the trend, not the level.' },
     { h: 'Prod Δ', u: 'MW', help: 'Real − Notified production (carries a basis offset — watch its movement). Rising = generation gaining on plan → pushes the system LONG (surplus, lower price). Upcoming (italic) = forecast deviation = Fcst prod − Notif prod.' },
     { h: 'Real cons', u: 'MW', help: 'Live national consumption from Transelectrica’s SEN feed (~10-min cadence, fresh to the minute), plus the forecast recorded at the 75-min gate in brackets (green = within 150 MW). Upcoming intervals (~italic), user-spec formula (2026-07-02) mirroring Fcst prod: FIXED Notif cons (the D-1 plan — its steps carry through) + the hourly deviation curve (solar-aware: distributed PV depresses metered consumption) + an intraday correction from REALISED consumption only (last-4 anomaly, trend-projected ≤2h). ~96 MW MAE at 15-min lead, ~145 at 75-min. Covers today + tomorrow.' },
     { h: 'Notif cons', u: 'MW', help: 'Notified (scheduled) consumption — the BRP demand plan, frozen D-1 ~22:45 RO. Kept for reference and for the Notif bal plan-balance, but less accurate than the live Real-cons nowcast.' },
@@ -1885,6 +2198,19 @@ async function predictPage(date) {
   // production + Real X-B forecasts LOCKED at the trade gate (prod_lock; mirrors the sign predictor's lock discipline)
   let prodLock = new Map();
   try { prodLock = new Map(db.prepare('SELECT isp, fcst, xb, cons, lean FROM prod_lock WHERE date_ro=?').all(date).map((r) => [r.isp, { fcst: r.fcst, xb: r.xb, cons: r.cons, lean: r.lean }])); } catch { /* table may be absent */ }
+  // Ê[spread] — live forecast for tradeable intervals + gate-locked records (spread_lock) for the rest
+  let sprdLock = new Map();
+  try { sprdLock = new Map(db.prepare('SELECT isp, es, realized_s FROM spread_lock WHERE date_ro=?').all(date).map((r) => [r.isp, r])); } catch { /* table may be absent */ }
+  const sprdFc = (() => { try { const f = getSpreadFc(date); return f ? f.rows : new Map(); } catch { return new Map(); } })();
+  const sprdCell = (isp, tsMs, gateMs2) => {
+    const lk = sprdLock.get(isp);
+    const fmtS = (v) => `<span class="${v > 0 ? 'pos' : 'neg'}">${v > 0 ? '+' : ''}${Math.round(v)}</span>${Math.abs(v) > 200 ? ' <b title="strong tier: |Ê|>200 RON/MWh (validated 393 RON/MWh avg on this tier)">●</b>' : ''}`;
+    if (lk) { // locked record; realized bracket once scored (green = direction matched)
+      return fmtS(lk.es) + (lk.realized_s != null ? ` <small class="${lk.es * lk.realized_s > 0 ? 'fc-ok' : 'fc-bad'}" title="realized spread (imbalance price − PZU ref recorded at lock)">(${lk.realized_s > 0 ? '+' : ''}${Math.round(lk.realized_s)})</small>` : '');
+    }
+    if (tsMs >= gateMs2 && sprdFc.has(isp)) { const r = sprdFc.get(isp); return `<span class="sprd-live" data-sprd="${isp}" style="font-style:italic;opacity:.85" title="live Ê[spread] — freezes into a record at the 75-min gate">${fmtS(r.es)}</span>`; }
+    return '';
+  };
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
@@ -2003,8 +2329,8 @@ async function predictPage(date) {
       })()}</td>${'' /* sign-model S/D% display HIDDEN (user 2026-07-03): the physical lean is THE shown forecast now.
         The sign model keeps RUNNING + RECORDING in the background (lockDueForecasts → sign_lock, /api/predict_sign,
         pulse) — FUTURE TASK: compare sign-model vs physical-lean accuracy on the accumulated locked records. */}
-      <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td>
-      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)))}</span></td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
+      <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td><td>${sprdCell(isp, tsMs, gateMs)}</td>
+      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)), solFc.get(isp))}</span></td><td data-wind="${isp}">${windCell(isp, tsMs)}</td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
       <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) + (plv != null && plv.cons != null ? ` <small class="${Math.abs(dispCons - plv.cons) <= 150 ? 'fc-ok' : 'fc-bad'}" title="consumption forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.cons)})</small>` : '') : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
       <td data-rxb="${isp}"${xbTdAttr}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (() => { const xr = savedAvg.has(isp) ? savedAvg.get(isp) : rxb; if (xr === null) return fcstXBCell(fcstXB); return arrow(xr) + (plv && plv.xb != null ? ` <small class="xbf ${Math.abs(xr - plv.xb) <= 150 ? 'fc-ok' : 'fc-bad'}" title="Real X-B estimate as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${arrow(plv.xb)})</small>` : ''); })()}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
@@ -2048,7 +2374,7 @@ async function predictPage(date) {
     } catch { return ''; }
   })();
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>Predict ${date}</title>${STYLE}</head><body>
-${NAV('predict', date, null, colPicker('cols-predict', [], [7, 10, 13, 15, 17]))}<div class="content">
+${NAV('predict', date, null, colPicker('cols-predict', [], [7, 11, 14, 16, 18]))}<div class="content">
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
 ${huBar}<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
@@ -2135,6 +2461,26 @@ ${body}</table></div>
   setTimeout(tick,1200);
 })();</script>
 <script>(function(){
+  // LIVE Wind column: belt station composite + fleet MW on the live row, corrected forward MW/speed on upcoming rows (8 s).
+  var DATE=${JSON.stringify(date)};
+  function f1(v){return v==null?'':(+v).toFixed(1);}
+  function tick(){
+    fetch('/api/wind_now?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var lc=document.querySelector('tr.liverow td[data-wind]')||(j.liveIsp?document.querySelector('td[data-wind="'+j.liveIsp+'"]'):null);
+      if(lc){
+        var br=lc.querySelector('small.fc-ok,small.fc-bad');
+        var tip=(j.stations||[]).map(function(s){return s.name+' '+f1(s.ws)+(s.gust!=null?'/'+f1(s.gust):'')+' m/s'+(s.dir!=null?' '+Math.round(s.dir)+'°':'')+' ('+Math.round(s.age)+' min)';}).join(' · ').replace(/"/g,'&quot;');
+        var tr=j.trend10==null?'':' <small class="'+(j.trend10>=0?'pos':'neg')+'" title="fleet change over the last 10 min">'+(j.trend10>=0?'+':'')+Math.round(j.trend10)+'</small>';
+        var on=j.onset&&j.onset.flag?' <b class="wonset" title="wind starting: belt stations '+j.onset.ago+'→'+j.onset.now+' m/s in 3 h while the fleet is still low">⚠ starting</b>':'';
+        lc.innerHTML='<span class="wlive" title="'+tip+'">'+(j.comp!=null?'💨'+f1(j.comp)+' m/s':'<small>…</small>')+'</span> · <span class="wmw">'+(j.mw!=null?Math.round(j.mw).toLocaleString('en-US')+' MW':'')+tr+'</span>'+on+(br?' '+br.outerHTML:'');
+        if(lc.animate)lc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});
+      }
+      (j.fwd||[]).forEach(function(f){var e=document.querySelector('.wfwd[data-wisp="'+f.isp+'"]');if(e)e.innerHTML=(f.ws!=null?'~'+f1(f.ws)+' m/s · ':'')+(f.mw!=null?'~'+f.mw.toLocaleString('en-US')+' MW':'');});
+    }).catch(function(){}).finally(function(){setTimeout(tick,8000);});
+  }
+  setTimeout(tick,1500);
+})();</script>
+<script>(function(){
   // Live MM:SS countdown on every .ivtimer (the current trade interval's row + the caption): time until the current
   // ISP closes — at 0 that trade interval locks and the gate advances. Re-queried each tick so it survives the 15s refresh.
   function fmt(ms){ms=Math.max(0,ms);var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2);}
@@ -2185,6 +2531,21 @@ ${body}</table></div>
   }
   window.__paintForecast=paint;
   setInterval(paint,10000); setTimeout(paint,1500);
+})();</script>
+<script>(function(){ // live Ê[spread] refresh on tradeable rows (server renders; this keeps values ~30s fresh between reloads)
+  var DATE=${JSON.stringify(date)};
+  function paintSprd(){
+    fetch('/api/predict_spread?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var by={}; (j.rows||[]).forEach(function(r){by[r.isp]=r;});
+      document.querySelectorAll('.sprd-live').forEach(function(el){
+        var r=by[el.dataset.sprd];
+        if(!r)return; // crossed the gate → server shows the locked record on the next reload
+        var v=r.es, dot=Math.abs(v)>200?' <b title="strong tier: |Ê|>200 RON/MWh">●</b>':'';
+        el.innerHTML='<span class="'+(v>0?'pos':'neg')+'">'+(v>0?'+':'')+Math.round(v)+'</span>'+dot;
+      });
+    }).catch(function(){});
+  }
+  setInterval(paintSprd,30000); setTimeout(paintSprd,2500);
 })();</script>
 <script>(function(){
   function lbl(s){return s==='S'?'surplus':s==='D'?'deficit':'balanced';}
@@ -2450,7 +2811,7 @@ const server = http.createServer(async (req, res) => {
 
     // everything else requires a session (unless AUTH_ON is off — local dev)
     const user = cookieUser(req);
-    if (!user) {
+    if (AUTH_ON && !user) {
       if (url.pathname.startsWith('/api/')) return send(401, 'application/json', '{"error":"unauthenticated"}');
       res.writeHead(302, { Location: '/login' });
       return res.end();
@@ -2502,6 +2863,16 @@ const server = http.createServer(async (req, res) => {
       // live Notif X-B (DAMAS/PI commercial net export, freshest snapshot) so the client can refresh notif + Δ each poll
       let notifPi = null; if (soldIsp) { try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(qd, soldIsp); if (r) notifPi = r.commercial; } catch { /* table may be absent */ } }
       return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, notifPi, prod: sf ? sf.prod : null, cons: sf ? sf.cons : null, solar: sf ? sf.solar : null, wind: sf ? sf.wind : null, hydro: sf ? sf.hydro : null, nuclear: sf ? sf.nuclear : null, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
+    }
+    if (url.pathname === '/api/wind_now') {
+      // live belt wind + fleet MW for the current interval, and the corrected forward MW/speed per upcoming interval.
+      // READ-ONLY here: recording is the 24/7 logger's job (log_xb_pi.js). Writing from the server blocked the event
+      // loop for seconds whenever the logger held the write lock (busy_timeout 60 s) → every page crawled.
+      const qd = url.searchParams.get('date') || today; const ni = roDateIsp(new Date());
+      const P = windObs.pageData(db, qd, ni);
+      const tsOf = new Map(dayTimestamps(qd).map((t) => [t.isp, new Date(t.ts).getTime()]));
+      const fwd = []; for (const [isp, mw] of P.fc) { const w = P.wsF(tsOf.get(isp)); fwd.push({ isp, mw: Math.round(mw), ws: w == null ? null : +w.toFixed(1) }); }
+      return json({ date: qd, liveIsp: ni.date === qd ? ni.isp : null, comp: P.comp, stations: P.stations, mw: P.fleet.liveMw, trend10: P.fleet.trend10, onset: P.onset, lastIsp: P.lastIsp, fwd });
     }
     if (url.pathname === '/api/pulse') {
       // LIVE system-state nowcast from the freshest SCADA (sen_live table → no extra source load): dev = sold − plan
@@ -2564,6 +2935,22 @@ const server = http.createServer(async (req, res) => {
       const mae = (o) => (o.n ? { me: Math.round(o.m / o.n), entso: Math.round(o.e / o.n), n: o.n } : null);
       return json({ ok: true, days: RES_DAYS, solar: mae(acc.sol), wind: mae(acc.win), todaySolar: mae(acc.tSol), todayWind: mae(acc.tWin) });
     }
+    if (url.pathname === '/api/predict_spread') {
+      const date = url.searchParams.get('date') || roDateIsp(new Date()).date;
+      const ni = roDateIsp(new Date());
+      const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp);
+      const gateMs = curTs ? new Date(curTs.ts).getTime() + 75 * signModel.MIN : 0;
+      const fc = getSpreadFc(date);
+      const rows = [];
+      if (fc) for (const [isp, r] of fc.rows) { const t = dayTimestamps(date).find((x) => x.isp === isp); if (t && new Date(t.ts).getTime() >= gateMs) rows.push({ isp, es: Math.round(r.es), lead: r.lead }); }
+      return json({ anchor: fc ? fc.anchorTs : null, rows });
+    }
+    if (url.pathname === '/api/spread_score') {
+      const g = db.prepare('SELECT COUNT(*) n, AVG(CASE WHEN es*realized_s>0 THEN 1.0 ELSE 0 END) hit, AVG(SIGN(es)*realized_s) pnl FROM spread_lock WHERE realized_s IS NOT NULL').get();
+      const t2 = db.prepare('SELECT COUNT(*) n, AVG(CASE WHEN es*realized_s>0 THEN 1.0 ELSE 0 END) hit, AVG(SIGN(es)*realized_s) pnl FROM spread_lock WHERE realized_s IS NOT NULL AND ABS(es)>200').get();
+      const pending = db.prepare('SELECT COUNT(*) n FROM spread_lock WHERE realized_s IS NULL').get().n;
+      return json({ scored: g.n, hit: g.hit, pnl: g.pnl, strong: t2, pending });
+    }
     if (url.pathname === '/api/predict_sign') {
       // live forecast of the surplus/deficit SIGN + confidence for each UPCOMING interval. Fuses persistence
       // (last settled imbalance) + time-of-day + the PI order-flow on that interval. Refreshes as new PI trades land.
@@ -2617,6 +3004,14 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/pi') return send(200, 'text/html', piPage(url.searchParams.get('date') || today));
     if (url.pathname === '/predict') return send(200, 'text/html', await predictPage(url.searchParams.get('date') || today));
     if (url.pathname === '/pilearn') return send(200, 'text/html', await piLearnPage(url.searchParams.get('date') || today, url.searchParams.get('frame')));
+    if (url.pathname === '/api/fleet') return json(fleetData());
+    if (url.pathname === '/api/borders') return json(bordersData());
+    if (url.pathname === '/api/county_solar') return json(countySolar());
+    if (url.pathname === '/api/solar_now') { let cf = null; try { cf = await require('./sat_clouds').getClouds(); } catch { /* flat fallback */ } const cells = fleetData(); const nowRes = require('./solar_now').solarNow(db, cells, cf); const fc = require('./solar_forecast').solarForecast(nowRes, cells, [15, 30, 60, 90, 120]); return json({ ...nowRes, forecast: fc.ok ? fc.horizons : null }); }
+    if (url.pathname === '/api/clouds') return json(await require('./sat_clouds').getClouds());
+    if (url.pathname === '/api/cloudphoto') { try { return send(200, 'image/png', await require('./sat_clouds').getCloudPhoto()); } catch (e) { return send(502, 'text/plain', 'wms unavailable'); } }
+    if (url.pathname === '/map') return send(200, 'text/html', mapPage());
+    if (url.pathname === '/weather') return send(200, 'text/html', weatherPage());
     send(404, 'text/plain', 'not found');
   } catch (e) {
     res.writeHead(500, { 'Content-Type': 'text/plain' });
@@ -2625,6 +3020,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 const LISTEN_PORT = Number(process.env.PORT || PORT);
+// the keep-alive task relaunches every 5 min; when a server is already up the newcomer must leave quietly
+// (3,500+ EADDRINUSE stack traces had piled up in server.log)
+server.on('error', (e) => { if (e.code === 'EADDRINUSE') { console.log(`port ${LISTEN_PORT} already served — exiting`); process.exit(0); } throw e; });
 server.listen(LISTEN_PORT, '0.0.0.0', () => console.log(`trading UI listening on :${LISTEN_PORT}`));
 
 if (process.env.ENABLE_JOBS === '1') {

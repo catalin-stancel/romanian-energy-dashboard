@@ -43,11 +43,14 @@ function openDb() {
       source TEXT, args TEXT, started TEXT, finished TEXT, rows INTEGER, error TEXT
     );
     -- pull_weather's weather_hourly refresh filters by pulled_at (last PK column → unusable); without this index the
-    -- refresh scanned the whole weather table inside a write transaction every hour and locked every other writer out.
+    -- refresh scanned 2.5M rows inside a write transaction every hour at :09 and locked every other writer out.
     CREATE INDEX IF NOT EXISTS idx_weather_pulled ON weather (pulled_at);
   `);
   return db;
 }
+
+// BEGIN IMMEDIATE that survives a busy lock: waits busy_timeout, then retries with backoff instead of aborting the run.
+function beginImmediate(db) { retryBusy(() => db.exec('BEGIN IMMEDIATE')); }
 
 const roFmt = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Bucharest', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -87,9 +90,11 @@ function makeUpserter(db) {
   };
 }
 
-// Retry a write that lost a race for the DB lock. PRAGMA busy_timeout covers the ordinary case, but SQLite returns
-// SQLITE_BUSY *immediately* (no busy handler) when a deferred transaction must upgrade a read snapshot another
-// connection invalidated — hence every writer uses BEGIN IMMEDIATE, wrapped here with backoff instead of aborting.
+
+// Retry a write that lost a race for the DB lock. PRAGMA busy_timeout covers the ordinary case, but SQLite
+// returns SQLITE_BUSY *immediately* (no busy handler) when a transaction has to upgrade a read snapshot that
+// another connection has since invalidated — which is why every writer here uses BEGIN IMMEDIATE. This is the
+// belt-and-braces for the writes that sit outside a transaction.
 function retryBusy(fn, tries = 5, baseMs = 120) {
   let last;
   for (let i = 0; i < tries; i++) {
@@ -101,6 +106,15 @@ function retryBusy(fn, tries = 5, baseMs = 120) {
   }
   throw last;
 }
-function beginImmediate(db) { retryBusy(() => db.exec('BEGIN IMMEDIATE')); }
 
-module.exports = { openDb, roDateIsp, makeUpserter, retryBusy, beginImmediate, DB_PATH };
+// Bookkeeping write for pull_log. NEVER throws: a locked DB here used to abort runs whose data was already
+// stored (and, in pull_entsoe, every series left in the catalog), leaving days of stale data behind.
+function logPull(db, source, args, started, finished, rows, error) {
+  try {
+    retryBusy(() => db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)').run(source, args, started, finished, rows, error));
+  } catch (e) {
+    console.warn('pull_log write failed (' + source + '): ' + (e.message || '').slice(0, 100));
+  }
+}
+
+module.exports = { openDb, roDateIsp, makeUpserter, retryBusy, beginImmediate, logPull, DB_PATH };

@@ -5,7 +5,7 @@
 // In-sample MAE (2026-06, ~19-day overlap): solar 246 vs ENTSO-E 250; wind 136 vs 128 — competitive. Refit hourly.
 function hourlyWeather(db, varName) {
   const m = new Map();
-  // fast path: pre-materialized latest-run ensemble mean (pull_weather.js maintains weather_hourly)
+  // fast path: pre-materialized latest-run ensemble mean (tool/pull_weather.js maintains weather_hourly)
   try { for (const r of db.prepare('SELECT ts_utc, value FROM weather_hourly WHERE var=? AND value IS NOT NULL').all(varName)) m.set(r.ts_utc.slice(0, 13), r.value); } catch { /* table may not exist yet */ }
   if (m.size) return m;
   // fallback: derive latest-run mean from raw weather (only if weather_hourly is empty/absent)

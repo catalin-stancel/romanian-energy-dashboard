@@ -4,7 +4,7 @@
 //   node tool\pull_weather.js          (pull current forecast run, all points/models)
 //
 // Every pull is stored with pulled_at so run-to-run forecast revisions can be computed later.
-const { beginImmediate, openDb } = require('./db');
+const { beginImmediate, openDb, logPull } = require('./db');
 
 const POINTS = {
   // Dobrogea wind belt (most of RO's ~3 GW wind)
@@ -51,8 +51,7 @@ async function main() {
     db.exec('COMMIT');
     console.log(`${name}: ok`);
   }
-  db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
-    .run('open-meteo', Object.keys(POINTS).join(','), pulledAt, new Date().toISOString(), total, null);
+  logPull(db, 'open-meteo', Object.keys(POINTS).join(','), pulledAt, new Date().toISOString(), total, null);
   console.log(`stored ${total} weather points (pulled_at=${pulledAt})`);
   // refresh the fast per-hour ensemble-mean table (weather_hourly) for this run — the app reads THIS, not the 2.4M-row raw table
   db.exec('CREATE TABLE IF NOT EXISTS weather_hourly(ts_utc TEXT, var TEXT, value REAL, pulled_at TEXT, PRIMARY KEY(ts_utc,var))');

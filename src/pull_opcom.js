@@ -8,7 +8,7 @@
 // CSRF token + session cookie, POST trading_for=DD/MM/YYYY). Interval alignment: see aligncheck —
 // verified 2026-06-11: OPCOM intervals are CET-day based (interval 1 starts 00:00 CET = 01:00 EET),
 // i.e. OPCOM interval i maps to our EET ISP i+4, with i=93..96 spilling into the next EET day.
-const { beginImmediate, openDb, makeUpserter, roDateIsp } = require('./db');
+const { beginImmediate, openDb, makeUpserter, roDateIsp, logPull } = require('./db');
 
 const URL_ = 'https://www.opcom.ro/grafice-ip-raportPIP-si-volumTranzactionat/ro';
 const UA = { 'User-Agent': 'Mozilla/5.0' };
@@ -111,12 +111,13 @@ async function main() {
       db.exec('COMMIT');
       console.log(`${day}: ${prices.size} prices`);
     } catch (e) {
-      console.warn(`${day}: FAILED ${e.message.slice(0, 120)}`);
+      // OPCOM answers 403 for a delivery day whose auction has not run yet (tomorrow before ~13:00 CET) — not a failure
+      if (/OPCOM 40[34]/.test(e.message) && day > new Date().toISOString().slice(0, 10)) console.log(`${day}: not published yet (${e.message})`);
+      else console.warn(`${day}: FAILED ${e.message.slice(0, 120)}`);
     }
     await sleep(700);
   }
-  db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
-    .run('opcom:pzu_ron', `${mode} ${dates[0]}..${dates[dates.length - 1]}`, new Date().toISOString(), new Date().toISOString(), total, null);
+  logPull(db, 'opcom:pzu_ron', `${mode} ${dates[0]}..${dates[dates.length - 1]}`, new Date().toISOString(), new Date().toISOString(), total, null);
   console.log(`total ${total} points`);
 }
 

@@ -5,7 +5,7 @@
 //   node tool\pull_entsoe.js list              (show catalog)
 //
 // Token: tool\config.json {"entsoe_token":"..."} or ENTSOE_TOKEN env var.
-const { beginImmediate, openDb, makeUpserter } = require('./db');
+const { beginImmediate, openDb, makeUpserter, logPull } = require('./db');
 const { getToken, apiGet, parseDocument, fmtPeriod, sleep } = require('./entsoe');
 
 const RO = '10YRO-TEL------P';
@@ -118,12 +118,12 @@ async function main() {
     try {
       const n = await pullSeries(db, token, entry, from, to);
       console.log(`${n} points`);
-      db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
-        .run('entsoe:' + entry.name, `${mode} ${from.toISOString()}..${to.toISOString()}`, started, new Date().toISOString(), n, null);
+      logPull(db, 'entsoe:' + entry.name, `${mode} ${from.toISOString()}..${to.toISOString()}`, started, new Date().toISOString(), n, null);
     } catch (e) {
       console.log('FAILED: ' + e.message.slice(0, 200));
-      db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
-        .run('entsoe:' + entry.name, mode, started, new Date().toISOString(), 0, e.message.slice(0, 500));
+      // never let the bookkeeping write abort the rest of the catalog: a locked DB here used to kill
+      // the whole run mid-catalog, leaving every later series stale until someone noticed
+      logPull(db, 'entsoe:' + entry.name, mode, started, new Date().toISOString(), 0, e.message.slice(0, 500));
     }
   }
 }

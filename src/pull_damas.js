@@ -7,7 +7,7 @@
 // Discovered endpoint (no auth):
 //   GET https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/
 //       publicReport/estimatedImbalancePrices?timeInterval={"from":"<ISO>","to":"<ISO>"}
-const { beginImmediate, openDb, makeUpserter } = require('./db');
+const { beginImmediate, openDb, makeUpserter, logPull } = require('./db');
 
 const BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/';
 
@@ -133,8 +133,7 @@ async function main() {
   }
   const started = new Date().toISOString();
   const n = await pull(db, from, to);
-  db.prepare('INSERT INTO pull_log VALUES (?,?,?,?,?,?)')
-    .run('damas:estimatedImbalancePrices', `${mode} ${from.toISOString()}..${to.toISOString()}`, started, new Date().toISOString(), n, null);
+  logPull(db, 'damas:estimatedImbalancePrices', `${mode} ${from.toISOString()}..${to.toISOString()}`, started, new Date().toISOString(), n, null);
   console.log(`stored ${n} points`);
 }
 

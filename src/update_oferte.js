@@ -27,9 +27,9 @@ async function download() {
 async function downloadRetry(tries = 4) {
   for (let i = 0; ; i++) {
     try { return await download(); } catch (e) {
-      const transient = /ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(String((e.cause && e.cause.message) || e.message));
+      const transient = /ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(String(e.cause && e.cause.message || e.message));
       if (!transient || i >= tries - 1) throw e;
-      const wait = 30000 * 2 ** i; console.warn(`download failed — retry ${i + 1}/${tries - 1} in ${wait / 1000}s`);
+      const wait = 30000 * 2 ** i; console.warn(`download failed (${(e.cause && e.cause.message) || e.message}) — retry ${i + 1}/${tries - 1} in ${wait / 1000}s`);
       await new Promise((r) => setTimeout(r, wait));
     }
   }

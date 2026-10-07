@@ -86,7 +86,7 @@ function ensureTable(db) {
   // backfill ts_ms (true SCADA time, naive ms) for any rows recorded before the column existed
   try {
     const need = db.prepare('SELECT ts_feed FROM sen_live WHERE ts_ms IS NULL').all();
-    if (need.length) { const upd = db.prepare('UPDATE sen_live SET ts_ms=? WHERE ts_feed=?'); db.exec('BEGIN'); for (const r of need) { const t = naiveMs(r.ts_feed); if (t != null) upd.run(t, r.ts_feed); } db.exec('COMMIT'); }
+    if (need.length) { const upd = db.prepare('UPDATE sen_live SET ts_ms=? WHERE ts_feed=?'); db.exec('BEGIN IMMEDIATE'); for (const r of need) { const t = naiveMs(r.ts_feed); if (t != null) upd.run(t, r.ts_feed); } db.exec('COMMIT'); }
   } catch (e) { try { db.exec('ROLLBACK'); } catch {} }
 }
 

@@ -11,7 +11,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function fetchDay(ep, day) {
   const from = day + 'T00:00:00.000Z', to = day + 'T23:59:59.000Z';
   const u = BASE + ep + '?FromUtc=' + encodeURIComponent(from) + '&ToUtc=' + encodeURIComponent(to);
-  // the JAO publication API stalls a couple of times a day (30 s timeouts / resets): one retry after a pause
+  // the JAO publication API stalls a couple of times a day (30 s timeouts / connection resets): one retry after a pause
   for (let attempt = 0; ; attempt++) {
     try {
       const r = await fetch(u, { signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'Mozilla/5.0' } });
