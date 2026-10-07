@@ -175,21 +175,21 @@ function histRowHtml(d, isp, label, last, gate) {
   // real production for that interval = sum of settled ENTSO-E generation by type; + the per-source split (.prodmix, follows the toggle)
   const ga = (k) => (m['gen_actual_' + k] ?? null);
   let rprod = null; for (const k of ['solar', 'wind_onshore', 'hydro_reservoir', 'hydro_ror', 'nuclear', 'gas', 'hard_coal', 'lignite', 'biomass', 'B25']) { const v = ga(k); if (v != null) rprod = (rprod || 0) + v; }
-  let rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear'), rgas = ga('gas');
+  let rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear'), rgas = ga('gas'), rstg = ga('B25'), rcoal = (ga('hard_coal') != null || ga('lignite') != null || ga('biomass') != null) ? (ga('hard_coal') || 0) + (ga('lignite') || 0) + (ga('biomass') || 0) : null;
   // FALLBACK when ENTSO-E actuals are missing for that day (Transelectrica skipped publishing 2026-10-02..05 entirely):
   // the interval average of our own SEN recording (sen_live) — same quantities, SCADA-sourced. Tagged in the title.
   let src = 'ENTSO-E settled';
-  let sen = null; try { sen = db.prepare('SELECT AVG(prod) p, AVG(cons) c, AVG(sold) s, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, AVG(gas) ga, COUNT(*) n FROM sen_live WHERE date_ro=? AND isp=? AND prod IS NOT NULL').get(d, isp); if (!sen || !sen.n) sen = null; } catch { /* ignore */ }
+  let sen = null; try { sen = db.prepare('SELECT AVG(prod) p, AVG(cons) c, AVG(sold) s, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, AVG(gas) ga, AVG(coal) co, AVG(biomass) bm, AVG(storage) stg, COUNT(*) n FROM sen_live WHERE date_ro=? AND isp=? AND prod IS NOT NULL').get(d, isp); if (!sen || !sen.n) sen = null; } catch { /* ignore */ }
   // PRIMARY = our recording of the live Transelectrica feed (what the main rows showed at the time); ENTSO-E settled only
   // when the recorder was down (user 2026-10-07: "the real prod data that we record from the live transelectrica feed").
-  if (sen) { rprod = sen.p; rso = sen.so; rwi = sen.wi; rhy = sen.hy; rnu = sen.nu; rgas = sen.ga; src = 'recorded live Transelectrica feed (interval average of ' + sen.n + ' readings)'; }
+  if (sen) { rprod = sen.p; rso = sen.so; rwi = sen.wi; rhy = sen.hy; rnu = sen.nu; rgas = sen.ga; rcoal = sen.co != null ? sen.co + (sen.bm || 0) : null; rstg = sen.stg; src = 'recorded live Transelectrica feed (interval average of ' + sen.n + ' readings)'; }
   else if (rprod !== null) src = 'ENTSO-E settled — our live recording is missing for this interval';
   // Real X-B: recorded SCADA average → live-recording average → ENTSO-E physical flows (Σ export − Σ import)
   if (sen && sen.s != null) rxb = -sen.s; // recorded live feed first (sen_interval is the same source, finalized)
   if (rxb === null) { try { const fl = db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series LIKE 'flow_%'").all(d, isp); let e = 0, i = 0, anyF = false; for (const r of fl) { if (r.series.startsWith('flow_RO_')) e += r.value; else i += r.value; anyF = true; } if (anyF) rxb = e - i; } catch { /* ignore */ } }
   // recorded belt wind speed for that interval (wind_interval COMPOSITE) — same read as the main rows' Wind cell
   let wsRec = null; try { const r = db.prepare("SELECT avg_ws FROM wind_interval WHERE date_ro=? AND isp=? AND station='COMPOSITE'").get(d, isp); if (r) wsRec = r.avg_ws; } catch { /* ignore */ }
-  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="gas">🔥${Math.round(rgas || 0)}</span><span title="coal & biomass">⚫${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0) - (rgas || 0)))}</span></span>`;
+  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="thermal: gas + coal + biomass (measured)">🔥${Math.round((rgas || 0) + (rcoal || 0))}</span><span title="battery storage discharge (feed field ISPOZ / ENTSO-E B25)"><i class="bess"></i>${Math.round(rstg != null ? rstg : rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0) - (rgas || 0) - (rcoal || 0))}</span></span>`;
   const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
   // weather as it was at that interval's hour
   let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
@@ -792,7 +792,12 @@ tr.hx .histlbl{background:var(--yg-yellow);color:var(--yg-black)}
 .wmw{font-weight:600}
 .prodmix span{margin-right:6px;white-space:nowrap}
 html.mix-off .prodmix{display:none}
-html.sign-off .fc-pi{display:none} /* Imbalance-column sign predictions, own switch in that header (independent of the global Predictions toggle) */
+html.sign-off .fc-pi{display:none}
+.gasflag{font-size:11px;white-space:nowrap;cursor:help}
+.stmode{font-size:11px;margin-left:1px;cursor:help;opacity:.85}.stbal{color:var(--neg);font-weight:700;opacity:1}
+/* Duracell-style battery glyph for the BESS discharge figure: black cell, copper top cap */
+.bess{display:inline-block;width:8px;height:12px;border-radius:2px;background:linear-gradient(to bottom,#c47a2c 0 34%,#151515 34% 100%);border:1px solid #6b6b6b;vertical-align:-2px;margin-right:2px;position:relative;box-sizing:border-box}
+.bess::before{content:'';position:absolute;top:-3px;left:1px;width:4px;height:2px;background:#c47a2c;border-radius:1px} /* Imbalance-column sign predictions, own switch in that header (independent of the global Predictions toggle) */
 .signtgl{cursor:pointer;display:inline-block;width:22px;height:12px;border-radius:7px;background:var(--ic-s);position:relative;vertical-align:middle;margin-left:5px;transition:background .15s}
 .signtgl::after{content:'';position:absolute;top:1px;left:11px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .15s}
 html.sign-off .signtgl{background:var(--border-2)} html.sign-off .signtgl::after{left:1px}
@@ -1661,6 +1666,28 @@ try { lockDueSpread(); scoreSpreadLocks(); } catch (e) { /* ignore at startup */
 try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } catch (e) { /* table may not exist yet */ }
 let senFilterCache = { at: 0, data: null };
 let _senLiveAt = { at: 0, v: 0 };
+// Battery discharge BEHAVIOUR per interval from the 10-s readings (tool/_storage_mode.mjs, validated vs DAMAS activations):
+//   'block' = flat inside the interval (range ≤ max(25 MW, 20% of level)) → a market/scheduled block (aFRR↑ ≈ baseline, price 907)
+//   'bal'   = range > 40% of level AND corr(storage, sold−plan) ≤ −0.5 → discharging as the system imports over plan = aFRR
+//             response (aFRR↑ 2.5× baseline, 62% deficit, price 1,390 — the price-relevant state)
+//   'mixed' otherwise; nothing below 40 MW. The live interval is classified from the readings so far (≥ 6).
+let _stModeCache = { at: 0, date: null, v: null };
+function storageModes(date) {
+  if (_stModeCache.date === date && Date.now() - _stModeCache.at < 20000) return _stModeCache.v;
+  const out = new Map();
+  try {
+    const by = new Map();
+    for (const r of db.prepare('SELECT isp, storage st, sold, plan FROM sen_live WHERE date_ro=? AND storage IS NOT NULL AND sold IS NOT NULL AND plan IS NOT NULL ORDER BY ts_ms').all(date)) (by.get(r.isp) || by.set(r.isp, []).get(r.isp)).push(r);
+    for (const [isp, pts] of by) {
+      if (pts.length < 6) continue; const st = pts.map((p) => p.st), dv = pts.map((p) => p.sold - p.plan);
+      const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length; const lvl = mean(st); if (lvl < 40) continue;
+      const range = Math.max(...st) - Math.min(...st); const mx = mean(st), my = mean(dv); let a = 0, b = 0, c = 0; for (let i = 0; i < st.length; i++) { a += (st[i] - mx) * (dv[i] - my); b += (st[i] - mx) ** 2; c += (dv[i] - my) ** 2; } const cr = b && c ? a / Math.sqrt(b * c) : 0;
+      out.set(isp, { mode: range <= Math.max(25, 0.2 * lvl) ? 'block' : (range > 0.4 * lvl && cr <= -0.5 ? 'bal' : 'mixed'), lvl: Math.round(lvl), range: Math.round(range), cr: +cr.toFixed(2), n: pts.length });
+    }
+  } catch { /* table/column may be absent */ }
+  _stModeCache = { at: Date.now(), date, v: out }; return out;
+}
+const stModeTag = (m) => !m ? '' : m.mode === 'block' ? `<span class="stmode" title="market block: battery output flat inside the interval (range ${m.range} MW on ${m.lvl}) — a scheduled PZU/PI position being delivered; historically no excess activation behind it (price ~907)">▬</span>` : m.mode === 'bal' ? `<span class="stmode stbal" title="BALANCING response: battery output rises as the system imports over plan (corr ${m.cr}, range ${m.range} MW on ${m.lvl}) — aFRR being followed; historically 2.5× the activation, 62% deficit, price ~1,390">⇅</span>` : `<span class="stmode" style="opacity:.5" title="mixed: a market block and a balancing response overlapping (range ${m.range} MW on ${m.lvl}, corr ${m.cr})">≈</span>`;
 function lastSenLiveAt() { // cached 30 s: when did the logger last store a sen_live row
   if (Date.now() - _senLiveAt.at < 30000) return _senLiveAt.v;
   try { const r = db.prepare("SELECT MAX(pulled_at) p FROM sen_live WHERE date_ro=?").get(roDateIsp(new Date()).date); _senLiveAt = { at: Date.now(), v: r && r.p ? Date.parse(r.p) : 0 }; } catch { _senLiveAt = { at: Date.now(), v: 0 }; }
@@ -1998,8 +2025,9 @@ function huEnv() {
 async function predictPage(date) {
   const SEN = await liveSEN(date).catch(() => new Map());
   // per-interval SCADA generation mix (avg over the interval's sen_live readings) → the prod split on SETTLED rows
+  const stModes = storageModes(date);
   const senMix = new Map();
-  try { for (const r of db.prepare("SELECT isp, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, AVG(gas) ga FROM sen_live WHERE date_ro=? AND solar IS NOT NULL GROUP BY isp").all(date)) senMix.set(r.isp, { solar: r.so, wind: r.wi, hydro: r.hy, nuclear: r.nu, gas: r.ga }); } catch { /* sen_live may be absent */ }
+  try { for (const r of db.prepare("SELECT isp, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, AVG(gas) ga, AVG(coal) co, AVG(biomass) bm, AVG(storage) stg FROM sen_live WHERE date_ro=? AND solar IS NOT NULL GROUP BY isp").all(date)) senMix.set(r.isp, { solar: r.so, wind: r.wi, hydro: r.hy, nuclear: r.nu, gas: r.ga, coal: r.co, biomass: r.bm, storage: r.stg }); } catch { /* sen_live may be absent */ }
   // FALLBACK for the realized "Real prod/cons/X-B" values. Those read the SEN-GRAFIC scrape (liveSEN), but that
   // endpoint goes dark for hours at a time (server-to-server black-hole) — and when it does, every Real cell fell
   // back to the italic forecast and the per-source split (which needs a realized prod) vanished entirely. We already
@@ -2142,7 +2170,7 @@ async function predictPage(date) {
   const liveNotif = SF && SF.plan !== null ? -SF.plan : null; // Notif X-B (net export) = −PLAN
   const liveProd = SF && SF.prod != null ? SF.prod : null; // live Transelectrica SCADA national generation (for the live row)
   const liveCons = SF && SF.cons != null ? SF.cons : null; // live Transelectrica SCADA national consumption (for the live row)
-  const liveSolar = SF ? SF.solar : null, liveWind = SF ? SF.wind : null, liveHydro = SF ? SF.hydro : null, liveNuclear = SF ? SF.nuclear : null, liveGas = SF ? SF.gas : null; // live SCADA generation mix (for the live-row prod split)
+  const liveSolar = SF ? SF.solar : null, liveWind = SF ? SF.wind : null, liveHydro = SF ? SF.hydro : null, liveNuclear = SF ? SF.nuclear : null, liveGas = SF ? SF.gas : null, liveCoal = SF ? SF.coal : null, liveBiomass = SF ? SF.biomass : null, liveStorage = SF ? SF.storage : null; // live SCADA generation mix (for the live-row prod split)
   // the interval the live reading belongs to per its SCADA timestamp (lags the wall-clock interval by the feed
   // delay) — the live value/colour/avg go in THIS row, not the wall-clock current one, until the SCADA clock reaches it.
   const liveSi = SF && SF.ts ? senFilter.tsInterval(SF.ts) : null;
@@ -2221,10 +2249,14 @@ async function predictPage(date) {
   const fcstProdCell = (v) => (v === null ? ''
     : `<span style="font-style:italic;opacity:.7" title="forecast generation = Notif prod (fixed D-1 plan, keeps its planned steps) + the day/evening deviation curve (solar-aware) + an intraday correction from realised production only (trend-projected) · ~93 MW MAE at 15-min lead, ~130 at 75-min">~${fmt(v)}</span>`);
   // live-row generation split from the SCADA feed: solar / wind / hydro / nuclear / other (coal+gas+biomass)
-  const prodMix = (prod, so, wi, hy, nu, gs) => { if (prod == null) return '';
-    const o = Math.max(0, Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0) - (gs || 0)));
+  const prodMix = (prod, so, wi, hy, nu, gs, co, st, stm) => { if (prod == null) return '';
+    // ⚫ = MEASURED coal + biomass (feed CARB + BMASA). The feed's PROD exceeds the itemized sources by a swinging 20–450 MW
+    // (unitemized/other + timing skew); showing that remainder under a coal icon produced phantom "coal spikes" (user 2026-10-07).
+    // 🔋 = the feed's own storage field (ISPOZ, "Instalatii de stocare" — verified 2026-10-07 against the homepage pie and ENTSO-E B25);
+    // widget-imported rows have no field → derived remainder (= storage + ~3 MW unitemized)
+    const resid = st != null ? Math.round(st) : Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0) - (gs || 0) - (co || 0));
     const s = (ic, v, t) => `<span title="${t}">${ic}${Math.round(v || 0)}</span>`;
-    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}${s('🔥', gs, 'gas')}<span title="coal & biomass">⚫${o}</span></span>`; };
+    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}${s('🔥', (gs || 0) + (co || 0), 'thermal: gas + coal + biomass (measured)')}<span title="BATTERY STORAGE discharge (derived): PROD is the balance cons − sold, so generation outside the feed's 7 categories lands here — and it matches ENTSO-E energy storage (B25) at r=0.94 (2026-10-07), plus ~70 MW per GW of load for grid losses. Batteries discharge into scarcity: corr +0.31 with the imbalance price, +286 RON/MWh over persistence at the 75-min gate, 0% negative prices when ≥300 MW. Live at 10 s, ~10 h before ENTSO-E publishes it. (${resid >= 0 ? '+' : ''}${resid} MW)"><i class="bess"></i>${resid}</span>${stModeTag(stm)}</span>`; };
   // upcoming Real X-B = pure physical identity (Fcst prod − Fcst cons), ~110 MW MAE — kept physical on purpose
   const fcstXBCell = (v) => (v === null ? ''
     : `<span class="xbf" style="font-style:italic;opacity:.75" title="Real cross-border estimate = Fcst prod − Fcst cons (pure physical identity, ~110 MW MAE at the 75-min lead). Compare with the Notif cross border next to it — the GAP between them is the expected imbalance lean. Updates live with the prod/cons nowcasts. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
@@ -2306,6 +2338,24 @@ async function predictPage(date) {
     if (tsMs >= gateMs2 && sprdFc.has(isp)) { const r = sprdFc.get(isp); return `<span class="sprd-live" data-sprd="${isp}" style="font-style:italic;opacity:.85" title="live Ê[spread] — freezes into a record at the 75-min gate">${fmtS(r.es)}</span>`; }
     return '';
   };
+  // ⛽ gas-activation flags (user 2026-10-07, tool/_gas_unplanned.mjs): live gas step vs the NOTIFIED dispatchable-plan step.
+  // UNPLANNED rise (gas ≥ +30 MW vs previous ISP while the plan rose < 40) = the expensive marginal gas unit being activated:
+  // price 1,329 vs 683 RON/MWh, P(>2000) 24% vs 6%, and the effect persists ~6 ISPs (+381 RON/MWh at the 75-min gate after
+  // price persistence). Plan UP but gas DOWN = surplus dumped: mean price −863, 0% spikes. Planned rises carry nothing.
+  const gasFlag = new Map(); // isp → { type: 'up'|'down', dgas, dplan }
+  { const gasAt = (k) => (k === liveIsp && liveGas != null ? liveGas : (senMix.get(k) && senMix.get(k).gas != null ? senMix.get(k).gas : null));
+    for (const { isp } of dayTimestamps(date)) { const g1 = gasAt(isp), g0 = gasAt(isp - 1); if (g1 == null || g0 == null) continue;
+      const np1 = G.get(isp) ? rnum(G.get(isp).brpsProduction) : null, np0 = G.get(isp - 1) ? rnum(G.get(isp - 1).brpsProduction) : null;
+      if (np1 == null || np0 == null || !pdSolar.has(isp) || !pdSolar.has(isp - 1) || !pdWind.has(isp) || !pdWind.has(isp - 1)) continue;
+      const dplan = (np1 - pdSolar.get(isp) - pdWind.get(isp)) - (np0 - pdSolar.get(isp - 1) - pdWind.get(isp - 1)); const dgas = g1 - g0;
+      if (dgas >= 30 && dplan < 40) gasFlag.set(isp, { type: 'up', dgas, dplan }); else if (dgas <= -30 && dplan >= 40) gasFlag.set(isp, { type: 'down', dgas, dplan }); } }
+  const gasTag = (isp, tradeable) => {
+    const f = gasFlag.get(isp);
+    if (f) return f.type === 'up' ? ` <span class="gasflag" title="UNPLANNED gas rise: +${Math.round(f.dgas)} MW vs the previous interval while the notified dispatchable plan moved ${f.dplan >= 0 ? '+' : ''}${Math.round(f.dplan)} MW → an expensive marginal unit was activated. Historically: mean imbalance price 1,329 vs 683 RON/MWh, P(>2000) 24% vs 6%; prices stay elevated for ~6 intervals.">⛽↑</span>` : ` <span class="gasflag" style="opacity:.75" title="plan UP but gas DOWN (${Math.round(f.dgas)} MW vs plan ${f.dplan >= 0 ? '+' : ''}${Math.round(f.dplan)}): surplus being dumped — historically mean price −863 RON/MWh, no spikes.">⛽↓</span>`;
+    if (tradeable) { for (let k = 1; k <= 6; k++) { const g = gasFlag.get(isp - k); if (g && g.type === 'up') return ` <span class="gasflag" style="opacity:.45" title="unplanned gas rise ${k} interval${k > 1 ? 's' : ''} ago (+${Math.round(g.dgas)} MW) — elevated price expected: +~380 RON/MWh over persistence at this lead, P(>2000) 16% vs 6%">⛽</span>`; } }
+    return '';
+  };
+
   const body = dayTimestamps(date).map(({ isp, ts }) => {
     const tsMs = new Date(ts).getTime();
     const isCurrent = nowInfo.date === date && nowMs >= tsMs && nowMs < tsMs + 900000;
@@ -2326,7 +2376,7 @@ async function predictPage(date) {
     const dispProd = (isLive && liveProd !== null) ? liveProd : realProd;
     const dispCons = (isLive && liveCons !== null) ? liveCons : realCons;
     // generation mix for the prod split: live SCADA on the live row, per-interval sen_live average on settled rows
-    const mx = isLive ? (liveProd !== null ? { solar: liveSolar, wind: liveWind, hydro: liveHydro, nuclear: liveNuclear, gas: liveGas } : null) : senMix.get(isp);
+    const mx = isLive ? (liveProd !== null ? { solar: liveSolar, wind: liveWind, hydro: liveHydro, nuclear: liveNuclear, gas: liveGas, coal: liveCoal, biomass: liveBiomass, storage: liveStorage } : null) : senMix.get(isp);
     const notifCons = g ? rnum(g.brpsConsumption) : null;
     const fcstConsBase = c ? rnum(c.grossForecastConsumption) : null; // DAMAS day-ahead forecast
     // USER-SPEC (2026-07-02): Fcst cons = fixed Notif cons + hourly deviation curve + realised-cons correction
@@ -2431,8 +2481,8 @@ async function predictPage(date) {
       })()}</td>${'' /* sign-model S/D% display HIDDEN (user 2026-07-03): the physical lean is THE shown forecast now.
         The sign model keeps RUNNING + RECORDING in the background (lockDueForecasts → sign_lock, /api/predict_sign,
         pulse) — FUTURE TASK: compare sign-model vs physical-lean accuracy on the accumulated locked records. */}
-      <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td><td>${sprdCell(isp, tsMs, gateMs)}</td>
-      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear, mx.gas) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)), solFc.get(isp))}</span></td><td data-wind="${isp}">${windCell(isp, tsMs)}</td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
+      <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}${gasTag(isp, tsMs >= gateMs && nowInfo.date === date)}</td><td>${sprdCell(isp, tsMs, gateMs)}</td>
+      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear, mx.gas, mx.coal != null ? mx.coal + (mx.biomass || 0) : null, mx.storage, stModes.get(isp)) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)), solFc.get(isp))}</span></td><td data-wind="${isp}">${windCell(isp, tsMs)}</td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
       <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) + (plv != null && plv.cons != null ? ` <small class="${Math.abs(dispCons - plv.cons) <= 150 ? 'fc-ok' : 'fc-bad'}" title="consumption forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.cons)})</small>` : '') : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
       <td data-rxb="${isp}"${xbTdAttr}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (() => { const xr = savedAvg.has(isp) ? savedAvg.get(isp) : rxb; if (xr === null) return fcstXBCell(fcstXB); return arrow(xr) + (plv && plv.xb != null ? ` <small class="xbf ${Math.abs(xr - plv.xb) <= 150 ? 'fc-ok' : 'fc-bad'}" title="Real X-B estimate as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${arrow(plv.xb)})</small>` : ''); })()}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
@@ -2553,7 +2603,7 @@ ${body}</table></div>
       // keepBr: PRESERVE the recorded-at-gate forecast bracket (small.fc-ok/.fc-bad) — overwriting without it
       // made the brackets flicker against the 15s full refresh (user-reported 2026-07-03).
       function keepBr(el){var b=el&&el.querySelector('small.fc-ok,small.fc-bad');return b?' '+b.outerHTML:'';}
-      function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)-(j.gas||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+s('🔥',j.gas,'gas')+'<span title="coal & biomass">⚫'+o+'</span></span>';}
+      function mixHtml(j){if(j.prod==null)return '';var o=j.coal!=null?Math.round(j.coal+(j.biomass||0)):null;var resid=j.storage!=null?Math.round(j.storage):Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)-(j.gas||0)-(j.coal||0)-(j.biomass||0));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+s('🔥',(j.gas||0)+(j.coal||0)+(j.biomass||0),'thermal: gas + coal + biomass (measured)')+'<span title="BATTERY STORAGE discharge (derived; matches ENTSO-E energy storage r=0.94): generation outside the feed&#39;s 7 categories, incl. ~70 MW/GW losses. Discharges into scarcity: tracks the imbalance price (+0.31), leads it at the gate (+286 RON/MWh). ('+(resid>=0?'+':'')+resid+' MW)"><i class="bess"></i>'+resid+'</span>'+(j.stmode?(j.stmode.mode==='block'?'<span class="stmode" title="market block: flat inside the interval (range '+j.stmode.range+' MW on '+j.stmode.lvl+')">▬</span>':j.stmode.mode==='bal'?'<span class="stmode stbal" title="BALANCING response: rising as the system imports over plan (corr '+j.stmode.cr+', range '+j.stmode.range+' MW on '+j.stmode.lvl+')">⇅</span>':'<span class="stmode" style="opacity:.5" title="mixed (range '+j.stmode.range+' MW on '+j.stmode.lvl+', corr '+j.stmode.cr+')">≈</span>'):'')+'</span>';}
       var pc=document.querySelector('td[data-rprod="'+j.soldIsp+'"]'); if(pc&&j.prod!=null){var brp=keepBr(pc);pc.innerHTML=Math.round(j.prod).toLocaleString('en-US')+brp+mixHtml(j);if(pc.animate)pc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       var cc=document.querySelector('td[data-rcons="'+j.soldIsp+'"]'); if(cc&&j.cons!=null){var brc=keepBr(cc);cc.innerHTML=Math.round(j.cons).toLocaleString('en-US')+brc;if(cc.animate)cc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       // Cross border Δ (live) for the current interval = interval-AVERAGE real X-B (right of the |) − LIVE Notif cross border
@@ -2990,7 +3040,7 @@ const server = http.createServer(async (req, res) => {
       if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks
       // live Notif X-B (DAMAS/PI commercial net export, freshest snapshot) so the client can refresh notif + Δ each poll
       let notifPi = null; if (soldIsp) { try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(qd, soldIsp); if (r) notifPi = r.commercial; } catch { /* table may be absent */ } }
-      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, notifPi, prod: sf ? sf.prod : null, cons: sf ? sf.cons : null, solar: sf ? sf.solar : null, wind: sf ? sf.wind : null, hydro: sf ? sf.hydro : null, nuclear: sf ? sf.nuclear : null, gas: sf ? sf.gas : null, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
+      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, notifPi, prod: sf ? sf.prod : null, cons: sf ? sf.cons : null, solar: sf ? sf.solar : null, wind: sf ? sf.wind : null, hydro: sf ? sf.hydro : null, nuclear: sf ? sf.nuclear : null, gas: sf ? sf.gas : null, coal: sf ? sf.coal : null, biomass: sf ? sf.biomass : null, storage: sf ? sf.storage : null, stmode: soldIsp ? (storageModes(qd).get(soldIsp) || null) : null, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
     }
     if (url.pathname === '/api/wind_now') {
       // live belt wind + fleet MW for the current interval, and the corrected forward MW/speed per upcoming interval.

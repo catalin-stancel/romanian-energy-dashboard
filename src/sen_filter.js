@@ -12,8 +12,10 @@
 //   Generation by source (instantaneous MW; the *15 twins are the 15-min values):
 //     CARB = coal (cărbune)  GAZE = gas  NUCL = nuclear  APE = hydro (ape)
 //     EOLIAN = wind (eolian)  FOTO = solar (fotovoltaic)  BMASA = biomass (biomasă)
+//     ISPOZ = STORAGE ("Instalatii de stocare", battery discharge) — NOT a tie-line: the homepage pie builds its storage slice
+//             from result['ISPOZ'] (verified 2026-10-07; corr 0.989 with PROD − Σ categories over 174k readings)
 //   Cross-border tie-line / interconnector flows (per substation, MW; sign = direction):
-//     MUKA = Mukachevo (UA)  ISPOZ/IS = Isaccea (UA)  VULC = Vulcănești (MD)  UNGE = Ungheni (MD)  IAS2 = Iași (MD)
+//     MUKA = Mukachevo (UA)  IS = Isaccea (UA)  VULC = Vulcănești (MD)  UNGE = Ungheni (MD)  IAS2 = Iași (MD)
 //     KOZL1/KOZL2 = Kozloduy (BG)  VARN = Varna (BG)  DOBR = Dobrudja (BG)
 //     DJER = Đerdap / Iron Gates (RS)  PANCEVO21/PANCEVO22 = Pančevo (RS)  SAND = Sándorfalva (HU)  BEKE1 = Békéscsaba (HU)
 //     CHEA / CHEF = internal hydro nodes;  KUSJ/GOTE/PARO/S110/SIP_/COSE/CIOA/MINT/KIKI = other tie-lines/nodes
@@ -24,7 +26,7 @@ const HDRS = {
   'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest',
   'Referer': 'https://www.transelectrica.ro/web/tel/home',
 };
-const DECODE = { PROD: 'prod', CONS: 'cons', SOLD: 'sold', PLAN: 'plan', CARB: 'coal', GAZE: 'gas', NUCL: 'nuclear', APE: 'hydro', EOLIAN: 'wind', FOTO: 'solar', BMASA: 'biomass' };
+const DECODE = { PROD: 'prod', CONS: 'cons', SOLD: 'sold', PLAN: 'plan', CARB: 'coal', GAZE: 'gas', NUCL: 'nuclear', APE: 'hydro', EOLIAN: 'wind', FOTO: 'solar', BMASA: 'biomass', ISPOZ: 'storage' };
 const num = (v) => { const n = Number(v); return v !== null && v !== undefined && v !== '' && Number.isFinite(n) ? n : null; };
 // SCADA timestamp "YY/M/DD HH:MM:SS" (RO wall-clock) → "naive" ms (Europe/Bucharest wall-clock treated as UTC).
 // Used to bucket readings into intervals by their TRUE data time (not our ~1-min-lagged record time) and to
@@ -80,8 +82,10 @@ function ensureTable(db) {
     coal REAL, gas REAL, nuclear REAL, hydro REAL, wind REAL, solar REAL, biomass REAL,
     raw TEXT
   );
+  CREATE INDEX IF NOT EXISTS ix_senlive_di ON sen_live(date_ro, isp);
   CREATE INDEX IF NOT EXISTS ix_senlive_di ON sen_live(date_ro, isp);`);
   try { db.exec('ALTER TABLE sen_live ADD COLUMN ts_ms INTEGER'); } catch { /* already present */ }
+  try { db.exec('ALTER TABLE sen_live ADD COLUMN storage REAL'); } catch { /* already present */ } // battery discharge (ISPOZ)
   db.exec('CREATE INDEX IF NOT EXISTS ix_senlive_tsms ON sen_live(ts_ms)');
   // backfill ts_ms (true SCADA time, naive ms) for any rows recorded before the column existed
   try {
@@ -96,10 +100,10 @@ function record(db, d, roDateIsp) {
   if (!d || !d.ts) return false;
   const ri = roDateIsp(new Date());
   const info = db.prepare(`INSERT OR IGNORE INTO sen_live
-    (pulled_at, ts_feed, date_ro, isp, ts_ms, sold, plan, prod, cons, coal, gas, nuclear, hydro, wind, solar, biomass, raw)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    (pulled_at, ts_feed, date_ro, isp, ts_ms, sold, plan, prod, cons, coal, gas, nuclear, hydro, wind, solar, biomass, storage, raw)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     new Date().toISOString(), d.ts, ri.date, ri.isp, naiveMs(d.ts), d.sold, d.plan, d.prod, d.cons,
-    d.coal, d.gas, d.nuclear, d.hydro, d.wind, d.solar, d.biomass, JSON.stringify(d.raw));
+    d.coal, d.gas, d.nuclear, d.hydro, d.wind, d.solar, d.biomass, d.storage, JSON.stringify(d.raw));
   return info.changes > 0;
 }
 
