@@ -143,5 +143,8 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
     senFilter.ensureIntervalTable(db);
     const ni = senFilter.backfillIntervals(db);
     console.log(`sen_interval +${ni} interval averages`);
+    // WAL hygiene every minute: a passive checkpoint is cheap and keeps the WAL small even if the 30-min TRUNCATE job lags
+    // (a 194 MB WAL left behind by a stray long-lived reader slowed every server read 3-5× on 2026-10-07)
+    try { const c = db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get(); if (c && c.log > 20000) console.log(`wal checkpoint: ${c.checkpointed}/${c.log} frames`); } catch { /* ignore */ }
   } catch (e) { console.error('sen_filter capture failed:', e.message); }
 })().catch((e) => { console.error(e); process.exit(1); });

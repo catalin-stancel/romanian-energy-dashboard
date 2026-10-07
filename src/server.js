@@ -175,21 +175,21 @@ function histRowHtml(d, isp, label, last, gate) {
   // real production for that interval = sum of settled ENTSO-E generation by type; + the per-source split (.prodmix, follows the toggle)
   const ga = (k) => (m['gen_actual_' + k] ?? null);
   let rprod = null; for (const k of ['solar', 'wind_onshore', 'hydro_reservoir', 'hydro_ror', 'nuclear', 'gas', 'hard_coal', 'lignite', 'biomass', 'B25']) { const v = ga(k); if (v != null) rprod = (rprod || 0) + v; }
-  let rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear');
+  let rso = ga('solar'), rwi = ga('wind_onshore'), rhy = (ga('hydro_reservoir') || 0) + (ga('hydro_ror') || 0), rnu = ga('nuclear'), rgas = ga('gas');
   // FALLBACK when ENTSO-E actuals are missing for that day (Transelectrica skipped publishing 2026-10-02..05 entirely):
   // the interval average of our own SEN recording (sen_live) — same quantities, SCADA-sourced. Tagged in the title.
   let src = 'ENTSO-E settled';
-  let sen = null; try { sen = db.prepare('SELECT AVG(prod) p, AVG(cons) c, AVG(sold) s, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, COUNT(*) n FROM sen_live WHERE date_ro=? AND isp=? AND prod IS NOT NULL').get(d, isp); if (!sen || !sen.n) sen = null; } catch { /* ignore */ }
+  let sen = null; try { sen = db.prepare('SELECT AVG(prod) p, AVG(cons) c, AVG(sold) s, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, AVG(gas) ga, COUNT(*) n FROM sen_live WHERE date_ro=? AND isp=? AND prod IS NOT NULL').get(d, isp); if (!sen || !sen.n) sen = null; } catch { /* ignore */ }
   // PRIMARY = our recording of the live Transelectrica feed (what the main rows showed at the time); ENTSO-E settled only
   // when the recorder was down (user 2026-10-07: "the real prod data that we record from the live transelectrica feed").
-  if (sen) { rprod = sen.p; rso = sen.so; rwi = sen.wi; rhy = sen.hy; rnu = sen.nu; src = 'recorded live Transelectrica feed (interval average of ' + sen.n + ' readings)'; }
+  if (sen) { rprod = sen.p; rso = sen.so; rwi = sen.wi; rhy = sen.hy; rnu = sen.nu; rgas = sen.ga; src = 'recorded live Transelectrica feed (interval average of ' + sen.n + ' readings)'; }
   else if (rprod !== null) src = 'ENTSO-E settled — our live recording is missing for this interval';
   // Real X-B: recorded SCADA average → live-recording average → ENTSO-E physical flows (Σ export − Σ import)
   if (sen && sen.s != null) rxb = -sen.s; // recorded live feed first (sen_interval is the same source, finalized)
   if (rxb === null) { try { const fl = db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series LIKE 'flow_%'").all(d, isp); let e = 0, i = 0, anyF = false; for (const r of fl) { if (r.series.startsWith('flow_RO_')) e += r.value; else i += r.value; anyF = true; } if (anyF) rxb = e - i; } catch { /* ignore */ } }
   // recorded belt wind speed for that interval (wind_interval COMPOSITE) — same read as the main rows' Wind cell
   let wsRec = null; try { const r = db.prepare("SELECT avg_ws FROM wind_interval WHERE date_ro=? AND isp=? AND station='COMPOSITE'").get(d, isp); if (r) wsRec = r.avg_ws; } catch { /* ignore */ }
-  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="other (coal/gas/biomass)">🔥${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0)))}</span></span>`;
+  const rprodCell = rprod === null ? '' : `<span title="${src}">${f(rprod)}</span>` + ` <span class="prodmix">| <span title="solar">☀️${Math.round(rso || 0)}</span><span title="wind">💨${Math.round(rwi || 0)}</span><span title="hydro">💧${Math.round(rhy)}</span><span title="nuclear">⚛️${Math.round(rnu || 0)}</span><span title="gas">⛽${Math.round(rgas || 0)}</span><span title="other (coal/biomass)">🔥${Math.max(0, Math.round(rprod - (rso || 0) - (rwi || 0) - rhy - (rnu || 0) - (rgas || 0)))}</span></span>`;
   const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
   // weather as it was at that interval's hour
   let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
@@ -386,7 +386,7 @@ const NAV = (active, date, refreshSec, extras) => `
     <span id="updsec">⟳ ${refreshSec.left}s</span></div>
   <script>(function(){var left=${refreshSec.left};setInterval(function(){left--;
     var el=document.getElementById('updsec');
-    if(left<=0){el.textContent='⟳ data…';if(left<=-3)location.reload();return;}
+    if(left<=0){el.textContent='⟳ data…';if(left<=-3&&!window.__reloading){window.__reloading=1;fetch(location.href,{cache:'no-store'}).then(function(r){return r.ok?r.text():Promise.reject(0);}).then(function(h){var d=new DOMParser().parseFromString(h,'text/html');var f=d.querySelector('.content table'),c=document.querySelector('.content table');if(f&&c&&f.rows.length>2){c.innerHTML=f.innerHTML;if(window.__applyColHiding)window.__applyColHiding();}var p=d.getElementById('updsec');left=p?parseInt((p.textContent.match(/\d+/)||[60])[0],10):60;}).catch(function(){left=20;}).finally(function(){window.__reloading=0;});}return;}
     el.textContent='⟳ '+left+'s';},1000);})();</script>` : ''}
   <div class="nav">
     <a class="${active === 'pzu' ? 'on' : ''}" href="/pzu">PZU positions</a>
@@ -829,7 +829,8 @@ tr td.xbtS,tr td.xbtF{background-color:var(--bg-surface);background-image:linear
 html.xbf-off tr td.xbtF{background-image:none;background-color:transparent} /* estimate hidden → tint off, zebra restored */
 html.xbf-off tr:nth-child(even) td.xbtF{background-color:var(--bg-subtle)}
 /* model predictions hidden by default (traders not yet briefed); header toggle flips html.preds-off */
-html.preds-off .fc-imb,html.preds-off .fc-lock,html.preds-off .pflag,html.preds-off #pulsebar,html.preds-off #scorebar{display:none!important}
+html.preds-off .fc-imb,html.preds-off .fc-lock,html.preds-off .pflag,html.preds-off #pulsebar,html.preds-off #scorebar,html.preds-off #pibar{display:none!important}
+.fc-pi{white-space:nowrap}
 .predtgl{cursor:pointer} .predtgl.predon{color:var(--ic-s);font-weight:700}
 .exp{cursor:pointer;display:inline-block;width:20px;height:20px;line-height:18px;text-align:center;font-size:12px;border:1px solid var(--border-2);border-radius:5px;color:var(--fg);background:var(--bg-subtle);user-select:none;margin-right:6px;vertical-align:middle}
 .exp:hover{border-color:var(--yg-yellow);background:var(--yg-yellow);color:var(--yg-black)}
@@ -1057,6 +1058,11 @@ function piPage(date) {
       ON x.ts_utc=p.ts_utc AND x.mr=p.run_at
     WHERE p.date_ro=?`).all(date, date).map((r) => [r.isp, r]));
   const userBets = new Map(db.prepare('SELECT isp, qty, source FROM user_bets WHERE date_ro=?').all(date).map((r) => [r.isp, r]));
+  // Ê[spread] book: frozen records for the day (+ realized), live Ê for still-tradeable rows, and the paper P&L vs the desk book
+  const sprdLockPi = new Map(); try { for (const r of db.prepare('SELECT isp, es, realized_s, desk_qty FROM spread_lock WHERE date_ro=?').all(date)) sprdLockPi.set(r.isp, r); } catch { /* ignore */ }
+  const sprdLivePi = (() => { try { const f = getSpreadFc(date); return f ? f.rows : new Map(); } catch { return new Map(); } })();
+  const bookDay = spreadBook(date, date), bookMonth = spreadBook(date.slice(0, 7) + '-01', date);
+  const niPi = roDateIsp(new Date()); const curPi = dayTimestamps(niPi.date).find((t) => t.isp === niPi.isp); const gatePiMs = (curPi ? new Date(curPi.ts).getTime() : Date.now()) + 75 * 60000;
 
   // country system data for the day: generation per source, flows per border (realized),
   // scheduled exchanges (commitments), DA net position
@@ -1237,6 +1243,15 @@ function piPage(date) {
     const npda = svL('net_pos_da', ts);
     const pzuCommitC = npda !== null ? `${npda >= 0 ? '↑' : '↓'}${Math.round(Math.abs(npda))}` : '';
     const inWindow = isp >= winFrom && isp <= winTo;
+    // Ê book cell: S/D + tier (2.0/2.5) from the spread forecast — frozen record (with its realized paper P&L once settled) or live italic on tradeable rows
+    const ebookC = (() => {
+      if (!inWindow) return '';
+      const lk = sprdLockPi.get(isp);
+      if (lk) { const q = spreadQty(lk.es); const tag = `<span class="badge ${q > 0 ? 'srp' : 'dfc'}" title="Ê[imb price − PZU] frozen at the 75-min gate: ${lk.es > 0 ? '+' : ''}${Math.round(lk.es)} RON/MWh → ${q > 0 ? 'BUY' : 'SELL'} ${Math.abs(q).toFixed(1)} MWh on PZU/PI, left open to balancing${lk.desk_qty != null ? ' · desk then ' + (lk.desk_qty > 0 ? '+' : '') + lk.desk_qty.toFixed(1) : ''}">${q > 0 ? 'BUY' : 'SELL'} ${Math.abs(q).toFixed(1)}</span>`;
+        return lk.realized_s == null ? tag : tag + ` <span class="${q * lk.realized_s >= 0 ? 'pos' : 'neg'}" title="paper P&L of the Ê position = qty × realized (imb price − PZU)">${fmt(q * lk.realized_s)}</span>`; }
+      if (nowInfo.date === date && tsMs >= gatePiMs && sprdLivePi.has(isp)) { const es = sprdLivePi.get(isp).es; const q = spreadQty(es); return `<span style="font-style:italic;opacity:.8" title="live Ê ${es > 0 ? '+' : ''}${Math.round(es)} RON/MWh — freezes at the 75-min gate">${q > 0 ? 'BUY' : 'SELL'} ${Math.abs(q).toFixed(1)}</span>`; }
+      return '';
+    })();
     const priceClass = inWindow && pnl !== null ? (pnl >= 0 ? 'pnlpos' : 'pnlneg') : '';
     const lastClass = imbPrice !== null && imbPrice < 0 ? 'lastneg' : 'lastpos';
     const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
@@ -1250,7 +1265,8 @@ function piPage(date) {
       <td class="${sysFc ? 'fc' : ''}">${xbC}</td>
       <td>${deskC}</td>
       <td>${pzuCommitC}</td>
-      <td>${qty ? `<span class="badge ${qty > 0 ? 'srp' : 'dfc'}">${qty > 0 ? 'SELL' : 'BUY'}</span> ${Math.abs(qty).toFixed(1)}${ub.source === 'auto' ? ' <small>auto</small>' : ''}` : ''}</td>
+      <td>${ebookC}</td>
+      <td>${qty ? `<span class="badge ${qty > 0 ? 'srp' : 'dfc'}" title="${qty > 0 ? 'BUY on PZU/PI, left open — settles on balancing (earns when the imbalance price is ABOVE PZU)' : 'SELL on PZU/PI, left open — settles on balancing (earns when the imbalance price is BELOW PZU)'}">${qty > 0 ? 'BUY' : 'SELL'}</span> ${Math.abs(qty).toFixed(1)}${ub.source === 'auto' ? ' <small>auto</small>' : ''}` : ''}</td>
       <td>${pnl === null ? '' : `<span class="${pnl >= 0 ? 'pos' : 'neg'}">${fmt(pnl)}</span>`}</td>
     </tr>`;
   }).join('\n');
@@ -1270,12 +1286,13 @@ function piPage(date) {
     WHERE b.date_ro=? AND b.qty > 0`).get(date, date).s;
   const extras = `
     <span class="totalpill r2 ${cum >= 0 ? 'tp-pos' : 'tp-neg'}" title="realized day P&L">${Math.round(cum).toLocaleString('en-US')} RON</span>
+    <span class="pill2 r2 ${bookDay.spread_ron >= bookDay.desk_ron ? 'tp-pos' : ''}" title="Ê book (shadow): paper P&L today if every settled in-window interval had been positioned by the spread model (${bookDay.n} intervals, ${bookDay.spread_mwh.toFixed(0)} MWh, hit ${bookDay.n ? Math.round(100 * bookDay.spread_hit / bookDay.n) : 0}%) vs the desk book on the same intervals (${bookDay.desk_n} with a position, ${bookDay.desk_mwh.toFixed(0)} MWh). Month-to-date: Ê ${Math.round(bookMonth.spread_ron).toLocaleString('en-US')} RON (${bookMonth.spread_mwh ? Math.round(bookMonth.spread_ron / bookMonth.spread_mwh) : 0}/MWh) vs desk ${Math.round(bookMonth.desk_ron).toLocaleString('en-US')} RON (${bookMonth.desk_mwh ? Math.round(bookMonth.desk_ron / bookMonth.desk_mwh) : 0}/MWh), direction agreement ${bookMonth.desk_n ? Math.round(100 * bookMonth.agree / bookMonth.desk_n) : 0}%"><small>Ê book</small> ${bookDay.n ? Math.round(bookDay.spread_ron).toLocaleString('en-US') + ' <small>vs desk ' + Math.round(bookDay.desk_ron).toLocaleString('en-US') + '</small>' : '—'}</span>
     <span class="pill2 r2" title="model's expected day total at decision time"><small>exp</small> ${expTotal !== null ? Math.round(expTotal).toLocaleString('en-US') : '—'}</span>
     <span class="pill2 r2" title="locked prediction direction accuracy today"><small>acc</small> ${lockJudged ? Math.round(lockHits / lockJudged * 100) + '%' : '—'}</span>
     ${colPicker('cols-pi', [0, 5, 6, 7, 8])}`; // phone default: CET, Type, Qty, Price, position, P&L
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#FFF500"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="GAN Trading"><link rel="apple-touch-icon" href="/icon-180.png"><title>PI ${date}</title>${STYLE}</head><body>
 ${NAV('pi', date, { left: updLeft, period: 300 }, extras)}<div class="content">
-<table><tr><th>Interval</th><th>CET</th><th>Type</th><th title="system imbalance, MWh">Qty</th><th title="imbalance price, RON/MWh">Price</th><th title="country generation [MW]; hover a value for the per-source split">Prod</th><th title="consumption [MW]">Cons</th><th title="net cross-border [MW]: ↑ export, ↓ import">X-B</th><th title="external RO Signal Override desk — day-ahead PZU plan (BUY/SELL/HOLD + Q MW). Night = buy-only.">PZU plan</th><th title="DA-coupling net position committed yesterday on PZU [MW]: ↑ export, ↓ import">PZU D−1</th><th title="your position [MWh], balancing-side action">My position</th><th title="RON">P&amp;L</th></tr>
+<table><tr><th>Interval</th><th>CET</th><th>Type</th><th title="system imbalance, MWh">Qty</th><th title="imbalance price, RON/MWh">Price</th><th title="country generation [MW]; hover a value for the per-source split">Prod</th><th title="consumption [MW]">Cons</th><th title="net cross-border [MW]: ↑ export, ↓ import">X-B</th><th title="external RO Signal Override desk — day-ahead PZU plan (BUY/SELL/HOLD + Q MW). Night = buy-only.">PZU plan</th><th title="DA-coupling net position committed yesterday on PZU [MW]: ↑ export, ↓ import">PZU D−1</th><th title="Ê[spread] book — the validated spread model’s position per interval: BUY/SELL = the PZU/PI leg (left open, settled on balancing): BUY expects the imbalance price ABOVE PZU, SELL below. Size 2.0 MWh (2.5 when |Ê| ≥ 200). Settled rows show its paper P&L (qty × realized imbalance price − PZU). Shadow: does not change your positions.">Ê book</th><th title="your position [MWh], balancing-side action">My position</th><th title="RON">P&amp;L</th></tr>
 ${body}</table></div>
 <script>window.addEventListener('DOMContentLoaded',function(){
   var n=document.querySelector('tr.now')||document.querySelector('tr.lastpos,tr.lastneg');
@@ -1461,6 +1478,15 @@ function getSpreadFc(date) {
 }
 // Live regime anchors as of a publication-safe cutoff (= decision time for all upcoming intervals; matches training):
 //   persist = freshest settled imbalance; fracsurp = surplus-fraction of the last FRAC_W settled; netting = export−import.
+// live SCADA deviation (sold − plan) for the latest complete ISP — the sign model's dev/ddev features; 20-s cache
+let _liveDev = { at: 0, v: null };
+function liveDev(nowMs) {
+  if (Date.now() - _liveDev.at < 20000 && _liveDev.v) return _liveDev.v;
+  const k1 = roDateIsp(new Date(nowMs - 15 * signModel.MIN)), k0 = roDateIsp(new Date(nowMs - 30 * signModel.MIN));
+  const q = db.prepare('SELECT AVG(sold - plan) dv, COUNT(*) n FROM sen_live WHERE date_ro=? AND isp=? AND sold IS NOT NULL AND plan IS NOT NULL');
+  let v = { dev: 0, ddev: 0, hasDev: 0 }; try { const a = q.get(k1.date, k1.isp), b = q.get(k0.date, k0.isp); if (a && a.n >= 3 && a.dv != null) v = { dev: a.dv, ddev: b && b.n >= 3 && b.dv != null ? a.dv - b.dv : 0, hasDev: 1 }; } catch { /* ignore */ }
+  _liveDev = { at: Date.now(), v }; return v;
+}
 function liveRegime(cutoffMs) {
   const cut = new Date(cutoffMs).toISOString();
   const recent = db.prepare("SELECT value FROM series WHERE series='damas_est_sys_imbalance' AND value IS NOT NULL AND ts_utc<=? ORDER BY ts_utc DESC LIMIT ?").all(cut, signModel.FRAC_W);
@@ -1505,6 +1531,18 @@ try { db.exec('CREATE TABLE IF NOT EXISTS sign_lock(date_ro TEXT, isp INTEGER, p
 // Ê[spread] records, frozen at the 75-min trade gate (the price/profit project's live scorecard — sign_lock pattern).
 // es = Ê[imb price − PZU] RON/MWh at lock; pzu_ref = the PZU used (settlement reference at decision time);
 // realized_s filled by scoreSpreadLocks once the interval's settled prices publish.
+try { db.exec('ALTER TABLE spread_lock ADD COLUMN desk_qty REAL'); } catch { /* exists */ } // the desk/user position (user_bets, signed MWh) as it stood at the gate — the comparison book
+// Ê → position: sign(Ê) = surplus (+) / deficit (−); size tier 2.0 MWh base, 2.5 MWh when |Ê| ≥ 200 RON/MWh (the validated strong tier:
+// 472 RON/MWh @63% cover in the 26-month CV; live shadow +248 on that tier). Paper P&L = qty × realized (imb price − PZU), the desk's settlement formula.
+const SPREAD_STRONG = 200;
+const spreadQty = (es) => (es == null ? 0 : (es > 0 ? 1 : -1) * (Math.abs(es) >= SPREAD_STRONG ? 2.5 : 2.0));
+// paper books over a date range: Ê-sized book vs the desk book on the SAME scored intervals
+function spreadBook(from, to) {
+  const rows = db.prepare('SELECT l.date_ro, l.isp, l.es, l.realized_s, COALESCE(l.desk_qty, u.qty) desk FROM spread_lock l LEFT JOIN user_bets u ON u.date_ro=l.date_ro AND u.isp=l.isp WHERE l.date_ro>=? AND l.date_ro<=? AND l.realized_s IS NOT NULL').all(from, to);
+  const o = { n: rows.length, spread_ron: 0, spread_mwh: 0, spread_hit: 0, desk_ron: 0, desk_mwh: 0, desk_n: 0, desk_hit: 0, agree: 0 };
+  for (const r of rows) { const q = spreadQty(r.es); o.spread_ron += q * r.realized_s; o.spread_mwh += Math.abs(q); if (q * r.realized_s > 0) o.spread_hit++; if (r.desk) { o.desk_n++; o.desk_ron += r.desk * r.realized_s; o.desk_mwh += Math.abs(r.desk); if (r.desk * r.realized_s > 0) o.desk_hit++; if ((r.desk > 0) === (r.es > 0)) o.agree++; } }
+  return o;
+}
 try { db.exec('CREATE TABLE IF NOT EXISTS spread_lock(date_ro TEXT, isp INTEGER, es REAL, pzu_ref REAL, lead INTEGER, locked_at TEXT, realized_s REAL, scored_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('spread_lock table:', e.message); }
 // PANIC / big-PI-move log: flag + RECORD upcoming tradeable intervals being repositioned hard, so we can finally
 // VALIDATE the desk's "a big PI trade flips the state" intuition (so far unconfirmed: big moves mostly CONFIRM the
@@ -1527,7 +1565,7 @@ function lockDueForecasts() {
     if (has.get(ni.date, isp)) continue;                 // lock once
     let pi_move = 0; try { const fr = piStmt.all(ni.date, isp); if (fr.length >= 2) pi_move = fr[fr.length - 1].commercial - fr[0].commercial; } catch { /* ignore */ }
     const lead = (Tms - nowMs) / signModel.MIN;
-    const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(ni.date, isp), isp, lead);
+    const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(ni.date, isp), isp, lead, liveDev(nowMs));
     ins.run(ni.date, isp, +p.toFixed(4), p >= 0.5 ? 'S' : 'D', Math.round(Math.max(p, 1 - p) * 100), new Date().toISOString());
   }
 }
@@ -1555,7 +1593,7 @@ function detectPanics() {
     const burst = recentMove(frames, nowMs); const pa = Math.abs(burst); if (pa < PANIC_MW) continue;
     const pi_move = frames[frames.length - 1].c - frames[0].c; // cumulative repositioning — feeds the model prob
     const lead = (Tms - nowMs) / signModel.MIN;
-    const p = signModel.prob(model, reg.persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(ni.date, isp), isp, lead);
+    const p = signModel.prob(model, reg.persist, pi_move, reg.fracsurp, reg.netting, notifBalFor(ni.date, isp), isp, lead, liveDev(nowMs));
     const piDir = burst > 0 ? 'S' : 'D'; const opposes = piDir !== persistDir ? 1 : 0;
     const ex = sel.get(ni.date, isp);
     if (!ex) ins.run(ni.date, isp, new Date().toISOString(), burst, pa, reg.persist, +p.toFixed(4), piDir, persistDir, opposes);
@@ -1580,7 +1618,9 @@ function lockDueSpread() {
   const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
   const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN;
   const has = db.prepare('SELECT 1 FROM spread_lock WHERE date_ro=? AND isp=?');
-  const ins = db.prepare('INSERT OR IGNORE INTO spread_lock(date_ro,isp,es,pzu_ref,lead,locked_at) VALUES (?,?,?,?,?,?)');
+  try { db.exec('ALTER TABLE spread_lock ADD COLUMN desk_qty REAL'); } catch { /* exists */ }
+  const ins = db.prepare('INSERT OR IGNORE INTO spread_lock(date_ro,isp,es,pzu_ref,lead,locked_at,desk_qty) VALUES (?,?,?,?,?,?,?)');
+  const deskQ = db.prepare('SELECT qty FROM user_bets WHERE date_ro=? AND isp=?');
   let fc = null;
   for (const { isp, ts } of dayTimestamps(ni.date)) {
     if (isp < spreadModel.WIN_FROM || isp > spreadModel.WIN_TO) continue;
@@ -1589,7 +1629,7 @@ function lockDueSpread() {
     if (has.get(ni.date, isp)) continue;                              // lock once
     if (!fc) { fc = getSpreadFc(ni.date); if (!fc) return; }
     const r = fc.rows.get(isp); if (!r) continue;
-    ins.run(ni.date, isp, +r.es.toFixed(1), +r.pzu.toFixed(2), r.lead, new Date().toISOString());
+    const dq = deskQ.get(ni.date, isp); ins.run(ni.date, isp, +r.es.toFixed(1), +r.pzu.toFixed(2), r.lead, new Date().toISOString(), dq ? dq.qty : null);
   }
 }
 // Fill realized S onto locked records once the settled prices publish. Settlement mirrors the model target:
@@ -1605,9 +1645,12 @@ function scoreSpreadLocks() {
     set.run(+(pImb - r.pzu_ref).toFixed(1), new Date().toISOString(), r.date_ro, r.isp);
   }
 }
-setInterval(() => { try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { console.error('sign loop:', e.message); } }, 60000);
+const timed = (name, fn) => { const t0 = Date.now(); try { fn(); } catch (e) { console.error(name + ':', e.message); } const dt = Date.now() - t0; if (dt > 400) console.error(`[slow] ${name} took ${dt} ms`); };
+// stagger the 60-s maintenance loops so they never fire in the same second (five back-to-back sync loops = one 2-s freeze)
+const every60 = (offsetMs, fn) => setTimeout(() => { fn(); setInterval(fn, 60000); }, offsetMs);
+every60(5000, () => timed('sign loop', () => { lockDueForecasts(); detectPanics(); scorePanics(); }));
 try { lockDueForecasts(); detectPanics(); scorePanics(); } catch (e) { /* ignore at startup */ }
-setInterval(() => { try { lockDueSpread(); scoreSpreadLocks(); } catch (e) { console.error('spread loop:', e.message); } }, 60000);
+every60(17000, () => timed('spread loop', () => { lockDueSpread(); scoreSpreadLocks(); }));
 try { lockDueSpread(); scoreSpreadLocks(); } catch (e) { /* ignore at startup */ }
 // index for per-hour weather lookups (weather PK starts with `point`, so ts_utc filters were full scans ~230ms)
 try { db.exec('CREATE INDEX IF NOT EXISTS ix_weather_ts ON weather(ts_utc)'); } catch (e) { /* table may not exist yet */ }
@@ -1765,7 +1808,12 @@ const PD_TREND_HMAX = 8;   // trend extrapolation horizon cap (~2h): validated a
                            // midday slope leaked into EVENING rows (−285 MW at 20:45, user-caught 2026-07-02)
 const XB_PHYS = 2900;      // physical cross-border capacity clip (virtual-MWh rule: schedule reaches ±5260 vs
                            // physical ±2950 — clip estimate INPUTS so virtual imports don't drag the prod/XB fcst)
+const _gapMemo = { prod: { at: 0, k: null, v: null }, cons: { at: 0, k: null, v: null } };
 function prodAnomGap(m) {
+  const mm = _gapMemo.prod; if (mm.v !== undefined && mm.k === m && Date.now() - mm.at < 60000) return mm.v;
+  const v = _prodAnomGap(m); _gapMemo.prod = { at: Date.now(), k: m, v }; return v;
+}
+function _prodAnomGap(m) {
   try {
     const ni = roDateIsp(new Date());
     const rows = db.prepare(`SELECT sl.date_ro d, sl.isp, sl.p, se.value v, se.ts_utc ts, sf.value sol
@@ -1805,6 +1853,10 @@ function consCurveModel() {
   return model;
 }
 function consAnomGap(m) {
+  const mm = _gapMemo.cons; if (mm.v !== undefined && mm.k === m && Date.now() - mm.at < 60000) return mm.v;
+  const v = _consAnomGap(m); _gapMemo.cons = { at: Date.now(), k: m, v }; return v;
+}
+function _consAnomGap(m) {
   try {
     const ni = roDateIsp(new Date());
     const rows = db.prepare(`SELECT sl.date_ro d, sl.isp, sl.c cn, se.value v, se.ts_utc ts, sf.value sol
@@ -1884,9 +1936,45 @@ function lockDueProd() {
     ins.run(ni.date, isp, +b.fcst.toFixed(1), b.sched === null ? null : +b.sched.toFixed(1), b.curver === null ? null : +b.curver.toFixed(1), b.xb === null ? null : +b.xb.toFixed(1), b.cons == null ? null : +b.cons.toFixed(1), b.lean == null ? null : +b.lean.toFixed(1), new Date().toISOString());
   }
 }
-setInterval(() => { try { lockDueProd(); } catch (e) { console.error('prod lock:', e.message); } }, 60000);
+every60(29000, () => timed('prod lock', () => lockDueProd()));
+// ---- PI online learner (pi_learn.js) productionized: live p(surplus) = sigmoid(w0 + w1·tanh(persist/150) + w2·tanh(pi_move/100)) with the
+// learner's CURRENT weights; frozen at the 75-min gate into pi_lock (lock-once) and scored vs realized. Replay at the 75-min lead:
+// +0.8/+2.8/+2.3/+4.2/+3.5 pt over persistence Jun–Oct 2026, ~34% of flips called (tool/_pi_replay.mjs).
+try { db.exec('CREATE TABLE IF NOT EXISTS pi_lock(date_ro TEXT, isp INTEGER, p REAL, sign TEXT, conf INTEGER, persist REAL, pi_move REAL, locked_at TEXT, PRIMARY KEY(date_ro,isp))'); } catch (e) { console.error('pi_lock table:', e.message); }
+const PI_IMB_LAG_MIN = 25; // same publication realism as pi_learn.js
+function piWeights() { try { return db.prepare('SELECT w0, w1, w2, n FROM pi_learn_state WHERE id=1').get() || null; } catch { return null; } }
+const piProb = (w, persist, piMove) => 1 / (1 + Math.exp(-(w.w0 + w.w1 * Math.tanh(persist / 150) + w.w2 * Math.tanh(piMove / 100))));
+// live rows for the tradeable intervals of a date (start ≥ gate); pi_move = cumulative commercial change on that interval so far
+function piLiveRows(qd) {
+  const w = piWeights(); if (!w || !w.n) return [];
+  const nowMs = Date.now(); const ni = roDateIsp(new Date()); const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp);
+  const gateMs = (curTs ? new Date(curTs.ts).getTime() : nowMs) + 75 * signModel.MIN;
+  const reg = liveRegime(nowMs - PI_IMB_LAG_MIN * signModel.MIN); if (!reg) return [];
+  const fr = new Map(); try { for (const r of db.prepare('SELECT isp, commercial FROM xb_pi_snap WHERE date_ro=? ORDER BY pulled_at').all(qd)) { const a = fr.get(r.isp) || fr.set(r.isp, []).get(r.isp); a.push(r.commercial); } } catch { /* ignore */ }
+  const out = [];
+  for (const { isp, ts } of dayTimestamps(qd)) { const Tms = new Date(ts).getTime(); if (Tms < gateMs) continue; const a = fr.get(isp); const mv = a && a.length >= 2 ? a[a.length - 1] - a[0] : 0; const pr = piProb(w, reg.persist, mv); out.push({ isp, p: +pr.toFixed(3), sign: pr >= 0.5 ? 'S' : 'D', conf: Math.round(Math.max(pr, 1 - pr) * 100), pi_move: Math.round(mv), persist: Math.round(reg.persist) }); }
+  return out;
+}
+function lockDuePi() {
+  const w = piWeights(); if (!w || !w.n) return;
+  const nowMs = Date.now(); const ni = roDateIsp(new Date()); const curTs = dayTimestamps(ni.date).find((t) => t.isp === ni.isp); if (!curTs) return;
+  const gateMs = new Date(curTs.ts).getTime() + 75 * signModel.MIN;
+  const reg = liveRegime(nowMs - PI_IMB_LAG_MIN * signModel.MIN); if (!reg) return;
+  const has = db.prepare('SELECT 1 FROM pi_lock WHERE date_ro=? AND isp=?'), ins = db.prepare('INSERT OR IGNORE INTO pi_lock(date_ro,isp,p,sign,conf,persist,pi_move,locked_at) VALUES (?,?,?,?,?,?,?,?)');
+  const frames = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? ORDER BY pulled_at');
+  for (const { isp, ts } of dayTimestamps(ni.date)) {
+    const Tms = new Date(ts).getTime(); if (Tms >= gateMs || Tms < gateMs - 15 * signModel.MIN) continue; if (has.get(ni.date, isp)) continue; // only the row that just left the tradeable set, once
+    const a = frames.all(ni.date, isp).map((r) => r.commercial); const mv = a.length >= 2 ? a[a.length - 1] - a[0] : 0; const pr = piProb(w, reg.persist, mv);
+    ins.run(ni.date, isp, +pr.toFixed(4), pr >= 0.5 ? 'S' : 'D', Math.round(Math.max(pr, 1 - pr) * 100), +reg.persist.toFixed(1), +mv.toFixed(1), new Date().toISOString());
+  }
+}
+every60(41000, () => timed('pi lock', () => lockDuePi()));
+try { lockDuePi(); } catch { /* startup */ }
 // wind forecast frozen at the same 75-min gate (wind_lock) — settled rows show realized MW + the recorded forecast
-setInterval(() => { try { windObs.lockDue(db, dayTimestamps); } catch (e) { console.error('wind lock:', e.message); } }, 60000);
+every60(53000, () => timed('wind lock', () => windObs.lockDue(db, dayTimestamps)));
+// background warmer: refresh the 10-min curve models + 60-s anomaly-gap memos off the request path so a Predict render never
+// pays the two full sen_live scans (they were the 1.3–3 s render spikes once the memos expired)
+every60(23000, () => timed('warm curves', () => { const pm = prodCurveModel(); if (pm) prodAnomGap(pm); const cm = consCurveModel(); if (cm) consAnomGap(cm); }));
 try { windObs.lockDue(db, dayTimestamps); } catch { /* startup */ }
 try { lockDueProd(); } catch { /* startup */ }
 
@@ -1906,7 +1994,7 @@ async function predictPage(date) {
   const SEN = await liveSEN(date).catch(() => new Map());
   // per-interval SCADA generation mix (avg over the interval's sen_live readings) → the prod split on SETTLED rows
   const senMix = new Map();
-  try { for (const r of db.prepare("SELECT isp, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu FROM sen_live WHERE date_ro=? AND solar IS NOT NULL GROUP BY isp").all(date)) senMix.set(r.isp, { solar: r.so, wind: r.wi, hydro: r.hy, nuclear: r.nu }); } catch { /* sen_live may be absent */ }
+  try { for (const r of db.prepare("SELECT isp, AVG(solar) so, AVG(wind) wi, AVG(hydro) hy, AVG(nuclear) nu, AVG(gas) ga FROM sen_live WHERE date_ro=? AND solar IS NOT NULL GROUP BY isp").all(date)) senMix.set(r.isp, { solar: r.so, wind: r.wi, hydro: r.hy, nuclear: r.nu, gas: r.ga }); } catch { /* sen_live may be absent */ }
   // FALLBACK for the realized "Real prod/cons/X-B" values. Those read the SEN-GRAFIC scrape (liveSEN), but that
   // endpoint goes dark for hours at a time (server-to-server black-hole) — and when it does, every Real cell fell
   // back to the italic forecast and the per-source split (which needs a realized prod) vanished entirely. We already
@@ -2049,7 +2137,7 @@ async function predictPage(date) {
   const liveNotif = SF && SF.plan !== null ? -SF.plan : null; // Notif X-B (net export) = −PLAN
   const liveProd = SF && SF.prod != null ? SF.prod : null; // live Transelectrica SCADA national generation (for the live row)
   const liveCons = SF && SF.cons != null ? SF.cons : null; // live Transelectrica SCADA national consumption (for the live row)
-  const liveSolar = SF ? SF.solar : null, liveWind = SF ? SF.wind : null, liveHydro = SF ? SF.hydro : null, liveNuclear = SF ? SF.nuclear : null; // live SCADA generation mix (for the live-row prod split)
+  const liveSolar = SF ? SF.solar : null, liveWind = SF ? SF.wind : null, liveHydro = SF ? SF.hydro : null, liveNuclear = SF ? SF.nuclear : null, liveGas = SF ? SF.gas : null; // live SCADA generation mix (for the live-row prod split)
   // the interval the live reading belongs to per its SCADA timestamp (lags the wall-clock interval by the feed
   // delay) — the live value/colour/avg go in THIS row, not the wall-clock current one, until the SCADA clock reaches it.
   const liveSi = SF && SF.ts ? senFilter.tsInterval(SF.ts) : null;
@@ -2128,10 +2216,10 @@ async function predictPage(date) {
   const fcstProdCell = (v) => (v === null ? ''
     : `<span style="font-style:italic;opacity:.7" title="forecast generation = Notif prod (fixed D-1 plan, keeps its planned steps) + the day/evening deviation curve (solar-aware) + an intraday correction from realised production only (trend-projected) · ~93 MW MAE at 15-min lead, ~130 at 75-min">~${fmt(v)}</span>`);
   // live-row generation split from the SCADA feed: solar / wind / hydro / nuclear / other (coal+gas+biomass)
-  const prodMix = (prod, so, wi, hy, nu) => { if (prod == null) return '';
-    const o = Math.max(0, Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0)));
+  const prodMix = (prod, so, wi, hy, nu, gs) => { if (prod == null) return '';
+    const o = Math.max(0, Math.round(prod - (so || 0) - (wi || 0) - (hy || 0) - (nu || 0) - (gs || 0)));
     const s = (ic, v, t) => `<span title="${t}">${ic}${Math.round(v || 0)}</span>`;
-    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}<span title="other (coal/gas/biomass)">🔥${o}</span></span>`; };
+    return ` <span class="prodmix">| ${s('☀️', so, 'solar')}${s('💨', wi, 'wind')}${s('💧', hy, 'hydro')}${s('⚛️', nu, 'nuclear')}${s('⛽', gs, 'gas')}<span title="other (coal/biomass)">🔥${o}</span></span>`; };
   // upcoming Real X-B = pure physical identity (Fcst prod − Fcst cons), ~110 MW MAE — kept physical on purpose
   const fcstXBCell = (v) => (v === null ? ''
     : `<span class="xbf" style="font-style:italic;opacity:.75" title="Real cross-border estimate = Fcst prod − Fcst cons (pure physical identity, ~110 MW MAE at the 75-min lead). Compare with the Notif cross border next to it — the GAP between them is the expected imbalance lean. Updates live with the prod/cons nowcasts. ↑ = export, ↓ = import.">${arrow(v)}</span>`);
@@ -2196,6 +2284,8 @@ async function predictPage(date) {
     }
   } catch { /* series may be absent */ }
   // production + Real X-B forecasts LOCKED at the trade gate (prod_lock; mirrors the sign predictor's lock discipline)
+  let piLock = new Map();
+  try { piLock = new Map(db.prepare('SELECT isp, p, sign, conf, persist FROM pi_lock WHERE date_ro=?').all(date).map((r) => [r.isp, r])); } catch { /* table may be absent */ }
   let prodLock = new Map();
   try { prodLock = new Map(db.prepare('SELECT isp, fcst, xb, cons, lean FROM prod_lock WHERE date_ro=?').all(date).map((r) => [r.isp, { fcst: r.fcst, xb: r.xb, cons: r.cons, lean: r.lean }])); } catch { /* table may be absent */ }
   // Ê[spread] — live forecast for tradeable intervals + gate-locked records (spread_lock) for the rest
@@ -2204,7 +2294,7 @@ async function predictPage(date) {
   const sprdFc = (() => { try { const f = getSpreadFc(date); return f ? f.rows : new Map(); } catch { return new Map(); } })();
   const sprdCell = (isp, tsMs, gateMs2) => {
     const lk = sprdLock.get(isp);
-    const fmtS = (v) => `<span class="${v > 0 ? 'pos' : 'neg'}">${v > 0 ? '+' : ''}${Math.round(v)}</span>${Math.abs(v) > 200 ? ' <b title="strong tier: |Ê|>200 RON/MWh (validated 393 RON/MWh avg on this tier)">●</b>' : ''}`;
+    const fmtS = (v) => `<span class="${v > 0 ? 'pos' : 'neg'}">${v > 0 ? '+' : ''}${Math.round(v)}</span>${Math.abs(v) > 200 ? ' <b title="strong tier: |Ê|>200 RON/MWh (validated 393 RON/MWh avg on this tier)">●</b>' : ''} <small class="xbf" style="opacity:.7" title="Ê position: ${v > 0 ? 'BUY' : 'SELL'} ${Math.abs(spreadQty(v)).toFixed(1)} MWh on PZU/PI, left open to balancing (2.0 base, 2.5 when |Ê| ≥ 200)">${v > 0 ? 'BUY' : 'SELL'} ${Math.abs(spreadQty(v)).toFixed(1)}</small>`;
     if (lk) { // locked record; realized bracket once scored (green = direction matched)
       return fmtS(lk.es) + (lk.realized_s != null ? ` <small class="${lk.es * lk.realized_s > 0 ? 'fc-ok' : 'fc-bad'}" title="realized spread (imbalance price − PZU ref recorded at lock)">(${lk.realized_s > 0 ? '+' : ''}${Math.round(lk.realized_s)})</small>` : '');
     }
@@ -2231,7 +2321,7 @@ async function predictPage(date) {
     const dispProd = (isLive && liveProd !== null) ? liveProd : realProd;
     const dispCons = (isLive && liveCons !== null) ? liveCons : realCons;
     // generation mix for the prod split: live SCADA on the live row, per-interval sen_live average on settled rows
-    const mx = isLive ? (liveProd !== null ? { solar: liveSolar, wind: liveWind, hydro: liveHydro, nuclear: liveNuclear } : null) : senMix.get(isp);
+    const mx = isLive ? (liveProd !== null ? { solar: liveSolar, wind: liveWind, hydro: liveHydro, nuclear: liveNuclear, gas: liveGas } : null) : senMix.get(isp);
     const notifCons = g ? rnum(g.brpsConsumption) : null;
     const fcstConsBase = c ? rnum(c.grossForecastConsumption) : null; // DAMAS day-ahead forecast
     // USER-SPEC (2026-07-02): Fcst cons = fixed Notif cons + hourly deviation curve + realised-cons correction
@@ -2326,11 +2416,18 @@ async function predictPage(date) {
         if (fcstXB === null || nxb === null) return '';
         const lean = (fcstXB - nxb) / 4;
         return `<span class="xbf" style="font-style:italic;opacity:.7" title="expected imbalance lean = (Fcst Real X-B − Notif X-B)/4 [MWh] — how far predicted physics sits from the paper. Updates live with the prod/cons forecasts.">${dirIcon(lean > 0)} ~${fmt(Math.abs(lean))}</span>`;
+      })()}${(() => {
+        // PI order-flow model (pi_learn weights): live badge on tradeable rows (10 s paint), frozen record once locked at the gate,
+        // green/red once the interval settles. Hidden with the Predictions toggle (html.preds-off).
+        const lk = piLock.get(isp);
+        if (lk) return ` <small class="fc-lock fc-pi ${imb !== null ? ((imb > 0) === (lk.sign === 'S') ? 'fc-ok' : 'fc-bad') : ''}" title="PI model (persistence + intraday X-B repositioning) as frozen at the 75-min gate: ${lk.sign === 'S' ? 'surplus' : 'deficit'} ${lk.conf}% · persistence then ${lk.persist > 0 ? 'S' : 'D'}${imb !== null ? ' · realized ' + (imb > 0 ? 'S' : 'D') : ''}">PI ${lk.sign} ${lk.conf}%</small>`;
+        if (nowInfo.date === date && tsMs >= gateMs) return ` <span class="fc-imb fc-r fc-pi" data-pi="${isp}"></span>`;
+        return '';
       })()}</td>${'' /* sign-model S/D% display HIDDEN (user 2026-07-03): the physical lean is THE shown forecast now.
         The sign model keeps RUNNING + RECORDING in the background (lockDueForecasts → sign_lock, /api/predict_sign,
         pulse) — FUTURE TASK: compare sign-model vs physical-lean accuracy on the accumulated locked records. */}
       <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}</td><td>${sprdCell(isp, tsMs, gateMs)}</td>
-      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)), solFc.get(isp))}</span></td><td data-wind="${isp}">${windCell(isp, tsMs)}</td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
+      <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear, mx.gas) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)), solFc.get(isp))}</span></td><td data-wind="${isp}">${windCell(isp, tsMs)}</td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
       <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) + (plv != null && plv.cons != null ? ` <small class="${Math.abs(dispCons - plv.cons) <= 150 ? 'fc-ok' : 'fc-bad'}" title="consumption forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.cons)})</small>` : '') : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
       <td data-rxb="${isp}"${xbTdAttr}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (() => { const xr = savedAvg.has(isp) ? savedAvg.get(isp) : rxb; if (xr === null) return fcstXBCell(fcstXB); return arrow(xr) + (plv && plv.xb != null ? ` <small class="xbf ${Math.abs(xr - plv.xb) <= 150 ? 'fc-ok' : 'fc-bad'}" title="Real X-B estimate as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${arrow(plv.xb)})</small>` : ''); })()}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
@@ -2378,6 +2475,7 @@ ${NAV('predict', date, null, colPicker('cols-predict', [], [7, 11, 14, 16, 18]))
 <div style="margin:4px 0 8px;font-size:12px;color:var(--fg-muted)"><span id="rtdot" style="color:#1a9e57">●</span> live — updated <span id="rtstamp">just now</span> <small>· auto-refresh 15s</small></div>
 ${huBar}<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
+<div id="pibar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="resscore" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <table><caption class="gatecap">${gateCaption}</caption><tr><th>Int<span class="xbutgl" onclick="toggleXbu()" title="show/hide the per-interval border capacity used — H = Hungary imp/exp (vs JAO flow-based max), B = Bulgaria imp/exp (vs official NTC)"></span></th><th>CET</th>${head}</tr>
 ${body}</table></div>
@@ -2402,6 +2500,7 @@ ${body}</table></div>
           if(window.__applyColHiding)window.__applyColHiding();
           if(window.__reexpand)window.__reexpand(); // re-insert any user-expanded interval history (lost on table swap)
           if(window.__paintForecast)window.__paintForecast(); // re-fill the upcoming-interval sign forecasts
+          if(window.__paintPi)window.__paintPi();
           cur.querySelectorAll('.nxbcell').forEach(function(c){
             var o=oldNxb[c.dataset.isp];
             if(o!==undefined && o!=='' && o!==c.dataset.v && c.animate){ // value changed (PI trade) → bold 3-pulse blink
@@ -2449,7 +2548,7 @@ ${body}</table></div>
       // keepBr: PRESERVE the recorded-at-gate forecast bracket (small.fc-ok/.fc-bad) — overwriting without it
       // made the brackets flicker against the 15s full refresh (user-reported 2026-07-03).
       function keepBr(el){var b=el&&el.querySelector('small.fc-ok,small.fc-bad');return b?' '+b.outerHTML:'';}
-      function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+'<span title="other (coal/gas/biomass)">🔥'+o+'</span></span>';}
+      function mixHtml(j){if(j.prod==null)return '';var o=Math.max(0,Math.round(j.prod-(j.solar||0)-(j.wind||0)-(j.hydro||0)-(j.nuclear||0)-(j.gas||0)));function s(ic,v,t){return '<span title="'+t+'">'+ic+Math.round(v||0)+'</span>';}return ' <span class="prodmix">| '+s('☀️',j.solar,'solar')+s('💨',j.wind,'wind')+s('💧',j.hydro,'hydro')+s('⚛️',j.nuclear,'nuclear')+s('⛽',j.gas,'gas')+'<span title="other (coal/biomass)">🔥'+o+'</span></span>';}
       var pc=document.querySelector('td[data-rprod="'+j.soldIsp+'"]'); if(pc&&j.prod!=null){var brp=keepBr(pc);pc.innerHTML=Math.round(j.prod).toLocaleString('en-US')+brp+mixHtml(j);if(pc.animate)pc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       var cc=document.querySelector('td[data-rcons="'+j.soldIsp+'"]'); if(cc&&j.cons!=null){var brc=keepBr(cc);cc.innerHTML=Math.round(j.cons).toLocaleString('en-US')+brc;if(cc.animate)cc.animate([{opacity:1},{opacity:.62},{opacity:1}],{duration:600,easing:'ease-in-out'});}
       // Cross border Δ (live) for the current interval = interval-AVERAGE real X-B (right of the |) − LIVE Notif cross border
@@ -2479,6 +2578,24 @@ ${body}</table></div>
     }).catch(function(){}).finally(function(){setTimeout(tick,8000);});
   }
   setTimeout(tick,1500);
+})();</script>
+<script>(function(){
+  // PI order-flow model: live badges on tradeable rows + scorecard bar (hidden with the Predictions toggle)
+  var DATE=${JSON.stringify(date)};
+  function paintPi(){
+    fetch('/api/predict_pi?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var by={};(j.rows||[]).forEach(function(r){by[r.isp]=r;});
+      document.querySelectorAll('.fc-pi[data-pi]').forEach(function(el){var r=by[el.dataset.pi];if(!r)return;el.className='fc-imb fc-r fc-pi '+(r.sign==='S'?'fc-s':'fc-d');el.innerHTML='PI '+r.sign+' <small>'+r.conf+'%</small>';el.title='PI model: '+(r.sign==='S'?'surplus':'deficit')+' '+r.conf+'% — persistence '+(r.persist>0?'S':'D')+' ('+r.persist+' MWh) + intraday X-B repositioning on this interval '+(r.pi_move>=0?'+':'')+r.pi_move+' MW (export↑). Online learner, +3 pt over persistence live since Jun 2026.';});
+    }).catch(function(){});
+  }
+  function paintPiScore(){
+    fetch('/api/pi_score?date='+DATE,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+      var el=document.getElementById('pibar');if(!el)return;var t=j.today,m=j.month;if(!t||!t.n){el.style.display='none';return;}el.style.display='block';
+      var seq=(t.last||[]).map(function(s){return '<span title="isp '+s.isp+': PI '+s.pred+' '+s.conf+'%, actual '+s.act+'" style="color:'+(s.ok?'#1a9e57':'#d83a3a')+';font-weight:700">'+(s.ok?'✓':'✗')+'</span>';}).join(' ');
+      el.innerHTML='<b>📈 PI model today</b> · <b>'+t.hit+'/'+t.n+'</b> <small style="color:var(--fg-muted)">('+t.pct+'% vs persistence '+t.ppct+'%)</small> · <small style="color:var(--fg-muted)">recent</small> '+seq+(m&&m.n?' · <small style="color:var(--fg-muted)">month '+m.pct+'% vs '+m.ppct+'% (n='+m.n+')</small>':'');
+    }).catch(function(){});
+  }
+  window.__paintPi=paintPi; setInterval(paintPi,10000); setTimeout(paintPi,1600); setInterval(paintPiScore,15000); setTimeout(paintPiScore,1400);
 })();</script>
 <script>(function(){
   // Live MM:SS countdown on every .ivtimer (the current trade interval's row + the caption): time until the current
@@ -2762,12 +2879,17 @@ ${learnBanner}
 </body></html>`;
 }
 
+// Short server-side cache for the polled JSON endpoints: every open tab polls these every 8–30 s and each handler is synchronous CPU,
+// so N tabs multiplied the load and queued the page renders behind them (2026-10-07). Identical answers within the TTL are served from memory.
+const API_TTL = { '/api/wind_now': 5000, '/api/predict_sign': 5000, '/api/predict_pi': 5000, '/api/predict_spread': 10000, '/api/pulse': 5000, '/api/realxb_now': 3000, '/api/pi_score': 15000, '/api/sign_score': 15000, '/api/spread_score': 15000, '/api/res_score': 30000, '/api/spread_book': 15000, '/api/panics': 10000, '/api/xbpi': 10000 };
+const _apiCache = new Map();
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
     const today = roDateIsp(new Date()).date;
     const send = (code, type, body) => { res.writeHead(code, { 'Content-Type': type }); res.end(body); };
-    const json = (o) => send(200, 'application/json', JSON.stringify(o));
+    const _ttl = req.method === 'GET' ? API_TTL[url.pathname] : 0; const _ck = url.pathname + url.search;
+    const json = (o) => { const body = JSON.stringify(o); if (_ttl) _apiCache.set(_ck, { at: Date.now(), body }); return send(200, 'application/json', body); };
 
     // unauthenticated routes
     if (url.pathname === '/health') return json({ ok: true, ts: new Date().toISOString() });
@@ -2817,6 +2939,7 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
     req.user = user || 'local';
+    if (_ttl) { const c = _apiCache.get(_ck); if (c && Date.now() - c.at < _ttl) return send(200, 'application/json', c.body); }
 
     if (req.method === 'POST' && url.pathname === '/api/bet') {
       const { date, isp, qty } = await readBody(req);
@@ -2862,7 +2985,7 @@ const server = http.createServer(async (req, res) => {
       if (avg === null && sold !== null) avg = -sold; // seed with the live value so the average never blanks
       // live Notif X-B (DAMAS/PI commercial net export, freshest snapshot) so the client can refresh notif + Δ each poll
       let notifPi = null; if (soldIsp) { try { const r = db.prepare('SELECT commercial FROM xb_pi_snap WHERE date_ro=? AND isp=? AND commercial IS NOT NULL ORDER BY pulled_at DESC LIMIT 1').get(qd, soldIsp); if (r) notifPi = r.commercial; } catch { /* table may be absent */ } }
-      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, notifPi, prod: sf ? sf.prod : null, cons: sf ? sf.cons : null, solar: sf ? sf.solar : null, wind: sf ? sf.wind : null, hydro: sf ? sf.hydro : null, nuclear: sf ? sf.nuclear : null, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
+      return json({ isp, soldIsp, sold, realxb: sold !== null ? -sold : null, notifxb, notifPi, prod: sf ? sf.prod : null, cons: sf ? sf.cons : null, solar: sf ? sf.solar : null, wind: sf ? sf.wind : null, hydro: sf ? sf.hydro : null, nuclear: sf ? sf.nuclear : null, gas: sf ? sf.gas : null, avg, navg, plan: sf ? sf.plan : null, ts: sf && sf.ts ? sf.ts : new Date().toISOString() });
     }
     if (url.pathname === '/api/wind_now') {
       // live belt wind + fleet MW for the current interval, and the corrected forward MW/speed per upcoming interval.
@@ -2907,6 +3030,14 @@ const server = http.createServer(async (req, res) => {
       let mm = (isp - 1) * 15 - 60; if (mm < 0) mm += 1440;
       return json({ isp, cet: `${pad(Math.floor(mm / 60))}:${pad(mm % 60)}`, frames: out, realized });
     }
+    if (url.pathname === '/api/predict_pi') return json({ rows: piLiveRows(url.searchParams.get('date') || today) });
+    if (url.pathname === '/api/pi_score') {
+      // PI-model scorecard: today's locked calls vs realized (and vs persistence at lock time), plus month-to-date
+      const qd = url.searchParams.get('date') || today;
+      const score = (rows) => { let n = 0, hit = 0, pers = 0; const last = []; for (const r of rows) { if (r.imb == null) continue; n++; const act = r.imb > 0 ? 'S' : 'D'; const ok = act === r.sign; if (ok) hit++; if ((r.persist > 0 ? 'S' : 'D') === act) pers++; last.push({ isp: r.isp, pred: r.sign, conf: r.conf, act, ok }); } return { n, hit, pers, pct: n ? Math.round(hit / n * 100) : null, ppct: n ? Math.round(pers / n * 100) : null, last: last.slice(-6) }; };
+      const q = (from, to) => db.prepare("SELECT l.isp, l.sign, l.conf, l.persist, i.value imb FROM pi_lock l LEFT JOIN series i ON i.series='damas_est_sys_imbalance' AND i.date_ro=l.date_ro AND i.isp=l.isp WHERE l.date_ro>=? AND l.date_ro<=? ORDER BY l.date_ro, l.isp").all(from, to);
+      return json({ today: score(q(qd, qd)), month: score(q(qd.slice(0, 7) + '-01', qd)) });
+    }
     if (url.pathname === '/api/sign_score') {
       // today's locked-forecast scorecard: each settled interval's locked prediction vs the realized sign, the
       // running hit-rate, and the trailing MISS STREAK (the model "checking itself" — surfaces when it's off-trend
@@ -2945,6 +3076,11 @@ const server = http.createServer(async (req, res) => {
       if (fc) for (const [isp, r] of fc.rows) { const t = dayTimestamps(date).find((x) => x.isp === isp); if (t && new Date(t.ts).getTime() >= gateMs) rows.push({ isp, es: Math.round(r.es), lead: r.lead }); }
       return json({ anchor: fc ? fc.anchorTs : null, rows });
     }
+    if (url.pathname === '/api/spread_book') {
+      // paper P&L of the Ê-sized book vs the desk book (same intervals): the day and month-to-date
+      const qd = url.searchParams.get('date') || today;
+      return json({ date: qd, day: spreadBook(qd, qd), month: spreadBook(qd.slice(0, 7) + '-01', qd), tier: SPREAD_STRONG });
+    }
     if (url.pathname === '/api/spread_score') {
       const g = db.prepare('SELECT COUNT(*) n, AVG(CASE WHEN es*realized_s>0 THEN 1.0 ELSE 0 END) hit, AVG(SIGN(es)*realized_s) pnl FROM spread_lock WHERE realized_s IS NOT NULL').get();
       const t2 = db.prepare('SELECT COUNT(*) n, AVG(CASE WHEN es*realized_s>0 THEN 1.0 ELSE 0 END) hit, AVG(SIGN(es)*realized_s) pnl FROM spread_lock WHERE realized_s IS NOT NULL AND ABS(es)>200').get();
@@ -2975,7 +3111,7 @@ const server = http.createServer(async (req, res) => {
             const frames = framesByIsp.get(isp) || [];
             const pi_move = frames.length >= 2 ? frames[frames.length - 1].c - frames[0].c : 0; // cumulative → model
             const burst = recentMove(frames, nowMs); const pa = Math.abs(burst); // recent burst → panic flag
-            const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, nbMap.has(isp) ? nbMap.get(isp) : null, isp, lead);
+            const p = signModel.prob(model, persist, pi_move, reg.fracsurp, reg.netting, nbMap.has(isp) ? nbMap.get(isp) : null, isp, lead, liveDev(nowMs));
             out.push({ isp, p: +p.toFixed(3), conf: Math.round(Math.max(p, 1 - p) * 100), sign: p >= 0.5 ? 'S' : 'D', panic: pa >= PANIC_MW ? { abs: Math.round(pa), dir: burst > 0 ? 'S' : 'D', opposes: (burst > 0 ? 'S' : 'D') !== (persist > 0 ? 'S' : 'D') } : null });
           }
         }
@@ -3002,7 +3138,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/pzu') return json(pzuData(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pzu' || url.pathname === '/') return send(200, 'text/html', pzuPage(url.searchParams.get('date') || addDays(today, 1)));
     if (url.pathname === '/pi') return send(200, 'text/html', piPage(url.searchParams.get('date') || today));
-    if (url.pathname === '/predict') return send(200, 'text/html', await predictPage(url.searchParams.get('date') || today));
+    if (url.pathname === '/predict') { const t0 = Date.now(); const html = await predictPage(url.searchParams.get('date') || today); const dt = Date.now() - t0; const rows = (html.match(/<tr class=/g) || []).length; if (dt > 3000 || rows < 90) console.error(`[predict] render ${dt} ms, ${rows} rows${rows < 90 ? ' <-- EMPTY/PARTIAL' : ''}`); return send(200, 'text/html', html); }
     if (url.pathname === '/pilearn') return send(200, 'text/html', await piLearnPage(url.searchParams.get('date') || today, url.searchParams.get('frame')));
     if (url.pathname === '/api/fleet') return json(fleetData());
     if (url.pathname === '/api/borders') return json(bordersData());
@@ -3022,6 +3158,9 @@ const server = http.createServer(async (req, res) => {
 const LISTEN_PORT = Number(process.env.PORT || PORT);
 // the keep-alive task relaunches every 5 min; when a server is already up the newcomer must leave quietly
 // (3,500+ EADDRINUSE stack traces had piled up in server.log)
+// event-loop freeze monitor (user-reported blank Predict refreshes 2026-10-07): log any tick that arrives >2 s late
+let _lagLast = Date.now();
+setInterval(() => { const now = Date.now(); const late = now - _lagLast - 1000; _lagLast = now; if (late > 2000) console.error(`[loop] event loop blocked ~${(late / 1000).toFixed(1)} s (ended ${new Date(now).toISOString()})`); }, 1000);
 server.on('error', (e) => { if (e.code === 'EADDRINUSE') { console.log(`port ${LISTEN_PORT} already served — exiting`); process.exit(0); } throw e; });
 server.listen(LISTEN_PORT, '0.0.0.0', () => console.log(`trading UI listening on :${LISTEN_PORT}`));
 

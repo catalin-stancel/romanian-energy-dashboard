@@ -7,7 +7,9 @@
 // the PI order-flow signal is real. Learns as it goes — starts uninformed, self-calibrates.
 //   node tool/pi_learn.js     (schedule every ~15 min)
 const { beginImmediate, openDb } = require('./db');
-const LEAD_MIN = 60, IMB_LAG_MIN = 25, LR = 0.05, L2 = 0.0005;
+// LEAD_MIN = 75 (was 60, 2026-10-07): learn at the SAME lead the desk can act on (75-min trade gate) so the weights the live
+// pi_lock/badge use (server.js piProb) are calibrated for that horizon. Replay at 75 min still +0.8..+4.2 pt vs persistence.
+const LEAD_MIN = 75, IMB_LAG_MIN = 25, LR = 0.05, L2 = 0.0005;
 const sig = (z) => 1 / (1 + Math.exp(-z));
 
 try {

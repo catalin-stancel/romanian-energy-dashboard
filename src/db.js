@@ -45,6 +45,10 @@ function openDb() {
     -- pull_weather's weather_hourly refresh filters by pulled_at (last PK column → unusable); without this index the
     -- refresh scanned 2.5M rows inside a write transaction every hour at :09 and locked every other writer out.
     CREATE INDEX IF NOT EXISTS idx_weather_pulled ON weather (pulled_at);
+    -- the server's per-minute loops (detectPanics, sign/PI locks) read PI frames per (date_ro, isp); the original index is on
+    -- (ts_utc, pulled_at) only, so each lookup was a full scan of ~500k rows → ~2.4 s of event-loop freeze every minute.
+    CREATE TABLE IF NOT EXISTS xb_pi_snap(pulled_at TEXT, ts_utc TEXT, date_ro TEXT, isp INTEGER, d1 REAL, pi REAL, lt REAL, commercial REAL);
+    CREATE INDEX IF NOT EXISTS ix_xbsnap_di ON xb_pi_snap (date_ro, isp, pulled_at);
   `);
   return db;
 }

@@ -68,7 +68,9 @@ async function pollFast(db) {
 let _slowAt = { anm: 0, fc: 0 };
 async function pollSlow(db) {
   let n = 0;
-  if (Date.now() - _slowAt.anm > 5 * 60000) {
+  const lastAnm = (() => { try { const r = db.prepare("SELECT MAX(obs_ts) t FROM wind_obs WHERE station LIKE 'ANM:%'").get(); return r && r.t ? Date.parse(r.t) : 0; } catch { return 0; } })();
+  const lastFc = (() => { try { const r = db.prepare('SELECT MAX(run_at) r FROM wind_fc').get(); return r && r.r ? Date.parse(r.r + ':00Z') : 0; } catch { return 0; } })();
+  if (Date.now() - Math.max(_slowAt.anm, lastAnm) > 55 * 60000) {
     _slowAt.anm = Date.now();
     const j = await getJson('https://www.meteoromania.ro/wp-json/meteoapi/v2/starea-vremii', 12000);
     if (j && j.features && j.date) {
@@ -77,7 +79,7 @@ async function pollSlow(db) {
       n += storeObs(db, rows);
     }
   }
-  if (Date.now() - _slowAt.fc > 15 * 60000) {
+  if (Date.now() - Math.max(_slowAt.fc, lastFc) > 15 * 60000) {
     _slowAt.fc = Date.now();
     const names = Object.keys(SITES);
     const j = await getJson(`https://api.open-meteo.com/v1/forecast?latitude=${names.map((k) => SITES[k][0]).join(',')}&longitude=${names.map((k) => SITES[k][1]).join(',')}&hourly=wind_speed_120m&models=icon_eu&past_days=1&forecast_days=3&wind_speed_unit=ms&timezone=UTC`, 15000);
@@ -87,7 +89,7 @@ async function pollSlow(db) {
       beginImmediate(db);
       try { arr.forEach((o, i) => { const h = o.hourly || {}; (h.time || []).forEach((t, k) => { const v = h.wind_speed_120m && h.wind_speed_120m[k]; if (v != null) ins.run(run, t + ':00Z', names[i], v); }); }); db.exec('COMMIT'); n++; }
       catch (e) { try { db.exec('ROLLBACK'); } catch {} }
-      try { db.prepare("DELETE FROM wind_fc WHERE run_at < ?").run(new Date(Date.now() - 3 * 86400e3).toISOString().slice(0, 16)); } catch {}
+      try { beginImmediate(db); db.prepare("DELETE FROM wind_fc WHERE run_at < ?").run(new Date(Date.now() - 3 * 86400e3).toISOString().slice(0, 16)); db.prepare("DELETE FROM wind_fc WHERE run_at < ? AND run_at NOT IN (SELECT MAX(run_at) FROM wind_fc GROUP BY substr(run_at, 1, 13))").run(new Date(Date.now() - 2 * 3600e3).toISOString().slice(0, 16)); db.exec('COMMIT'); } catch { try { db.exec('ROLLBACK'); } catch {} }
     }
   }
   return n;
