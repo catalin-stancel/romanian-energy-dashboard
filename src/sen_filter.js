@@ -86,6 +86,11 @@ function ensureTable(db) {
   CREATE INDEX IF NOT EXISTS ix_senlive_di ON sen_live(date_ro, isp);`);
   try { db.exec('ALTER TABLE sen_live ADD COLUMN ts_ms INTEGER'); } catch { /* already present */ }
   try { db.exec('ALTER TABLE sen_live ADD COLUMN storage REAL'); } catch { /* already present */ } // battery discharge (ISPOZ)
+  // one-time backfill of storage from the stored raw JSON (ISPOZ) for rows recorded before the column existed — idempotent, ~3 s per 175k rows
+  try {
+    const miss = db.prepare("SELECT COUNT(*) c FROM sen_live WHERE storage IS NULL AND raw LIKE '%ISPOZ%'").get().c;
+    if (miss) { db.exec('BEGIN IMMEDIATE'); const n = db.prepare("UPDATE sen_live SET storage = CAST(json_extract(raw,'$.ISPOZ') AS REAL) WHERE storage IS NULL AND raw LIKE '%ISPOZ%' AND json_valid(raw)").run().changes; db.exec('COMMIT'); console.log('sen_live: backfilled storage (ISPOZ) for ' + n + ' rows'); }
+  } catch (e) { try { db.exec('ROLLBACK'); } catch {} }
   db.exec('CREATE INDEX IF NOT EXISTS ix_senlive_tsms ON sen_live(ts_ms)');
   // backfill ts_ms (true SCADA time, naive ms) for any rows recorded before the column existed
   try {
