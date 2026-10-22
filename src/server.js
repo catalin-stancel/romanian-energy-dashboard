@@ -1465,6 +1465,8 @@ try { senFilter.ensureTable(db); } catch (e) { console.error('sen_live table:', 
 // ---- real-time wind observations (belt PWS 12 s + METAR + ANM) for the Predict "Wind" column — tool/wind_obs.js
 const windObs = require('./wind_obs');
 try { windObs.ensureTables(db); } catch (e) { console.error('wind tables:', e.message); }
+const balModel = require('./bal_model');
+try { balModel.ensureTable(db); } catch (e) { console.error('bal table:', e.message); }
 // live sign predictor (P(surplus) per upcoming interval). Model trained on settled history, cached + retrained hourly.
 const signModel = require('./sign_model');
 const resModel = require('./res_model');
@@ -1488,6 +1490,8 @@ function loadModel(name, cache, trainFn) {
 function getSignModel() { return loadModel('sign', signCache, signModel.train); }
 function getResModel() { return loadModel('res', resCache, resModel.train); }
 function getSpreadModel() { return loadModel('spread', spreadCache, spreadModel.train); }
+const balCache = {};
+function getBalModel() { return loadModel('bal', balCache, balModel.train); }
 // Live Ê[spread] rows for a date, briefly cached (features move on settled publications ~15min; 30s is plenty)
 let spreadFcCache = { at: 0, date: null, data: null };
 function getSpreadFc(date) {
@@ -2015,6 +2019,7 @@ every60(41000, () => timed('pi lock', () => lockDuePi()));
 try { lockDuePi(); } catch { /* startup */ }
 // wind forecast frozen at the same 75-min gate (wind_lock) — settled rows show realized MW + the recorded forecast
 every60(53000, () => timed('wind lock', () => windObs.lockDue(db, dayTimestamps)));
+every60(47000, () => timed('bal lock', () => balModel.lockDue(db, dayTimestamps, getBalModel())));
 // background warmer: refresh the 10-min curve models + 60-s anomaly-gap memos off the request path so a Predict render never
 // pays the two full sen_live scans (they were the 1.3–3 s render spikes once the memos expired)
 every60(23000, () => timed('warm curves', () => { const pm = prodCurveModel(); if (pm) prodAnomGap(pm); const cm = consCurveModel(); if (cm) consAnomGap(cm); }));
@@ -2193,6 +2198,33 @@ async function predictPage(date) {
 
   // --- Wind column: live belt stations + fleet MW (live row), interval averages (settled), corrected forecast (forward)
   const WD = windObs.pageData(db, date, nowInfo);
+  const BD = balModel.pageData(db, date, nowInfo, liveIsp, getBalModel());
+  // Bal + True X-B cells. bal>0 = upward activation. real = the interval's Real X-B (live average or settled) for the Real−True readout.
+  const balCells = (isp, tsMs, nxb, real) => {
+    const r0 = (v) => Math.round(v), sgn = (v) => (v >= 0 ? '+' : '−') + Math.abs(r0(v));
+    const pb = BD.pub.get(isp), lk = BD.lock.get(isp), sc = BD.sch.get(isp);
+    const ended = tsMs + 900000 <= nowMs, isLiveRow = nowInfo.date === date && isp === liveIsp;
+    const published = pb && (pb.any || ended && nowMs - (tsMs + 900000) > 40 * 60000);
+    let bal = null, cell = '', ttl = '';
+    if (published) {
+      bal = pb.act;
+      ttl = `published activated energy: aFRR +${r0(4 * pb.aU)} / −${r0(4 * pb.aD)} MW, mFRR +${r0(4 * pb.mU)} / −${r0(4 * pb.mD)} MW · IGCC netting ${sgn(pb.net)} MW (not in FRR — already inside Real X-B)`;
+      const br = lk && lk.act_est != null ? ` <small class="${Math.abs(lk.act_est - bal) <= 100 ? 'fc-ok' : 'fc-bad'}" title="live estimate frozen at interval end (${lk.n} feed readings) vs published">(${sgn(lk.act_est)})</small>` : '';
+      cell = `<span class="${bal >= 0 ? 'neg' : 'pos'}" title="${ttl}">${sgn(bal)}</span>${br}`;
+    } else if (isLiveRow && BD.live) {
+      bal = BD.live.act; const f = BD.live.f;
+      ttl = `LIVE estimate from ${BD.live.n} feed readings so far: prod vs plan ${sgn(f.prodDev)} · cons vs plan ${sgn(f.consDev)} · gas ${r0(f.gas)} MW · battery ${r0(f.storage)} MW · sold−plan ${sgn(f.dev)}${f.mUpSch ? ' · mFRR↑ scheduled' : ''}${f.mDnSch ? ' · mFRR↓ scheduled' : ''} · nowcast imbalance ${sgn(BD.live.imb)} MWh (R² ${BD.model && BD.model.imb ? BD.model.imb.r2 : '?'})`;
+      cell = `<span class="${bal >= 0 ? 'neg' : 'pos'}" style="font-style:italic" title="${ttl}">~${sgn(bal)}</span>`;
+    } else if (ended && lk && lk.act_est != null) {
+      bal = lk.act_est; cell = `<span style="font-style:italic;opacity:.8" title="live estimate frozen at interval end — DAMAS publication pending">~${sgn(bal)}</span>`;
+    } else if (!ended && sc && ((sc.up ?? 0) > 0 || (sc.dn ?? 0) > 0)) {
+      cell = `<span title="mFRR already scheduled for this interval (marginal price ${(sc.up ?? 0) > 0 ? '↑ ' + r0(sc.up) : '↓ ' + r0(sc.dn)} RON/MWh)">${(sc.up ?? 0) > 0 ? '⏫' : '⏬'} sch</span>`;
+    }
+    const tru = bal != null && nxb != null ? nxb + bal : null;
+    const d = tru != null && real != null ? real - tru : null;
+    const tcell = tru == null ? '' : `<span title="Notif X-B ${sgn(nxb)} + FRR ${sgn(bal)}${d != null ? ' · Real − True = ' + sgn(d) + ' MW = imbalance before activation' : ''}">${arrow(tru)}</span>${d != null ? ' ' + dlt(d) : ''}`;
+    return `<td data-bal="${isp}">${cell}</td><td data-txb="${isp}">${tcell}</td>`;
+  };
   const windCell = (isp, tsMs) => {
     const f1 = (v) => (v == null ? '' : (+v).toFixed(1));
     const lk = WD.lock.get(isp);
@@ -2292,6 +2324,8 @@ async function predictPage(date) {
     { h: 'Cross border D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
     { h: 'Cross border PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
     { h: 'Cross border LT', u: 'MW', help: 'Long-term component of the notified cross-border (yearly + monthly capacity rights, nominated ahead of the day-ahead auction). Slowly varying — usually a steady net import on RO’s borders. This is the leg that makes Notif X-B ≠ D-1 + PI: Notif X-B = X-B D-1 + X-B PI + X-B LT. ↑ = export, ↓ = import.' },
+    { h: 'FRR', u: 'MW', help: 'Balancing energy being ACTIVATED by Transelectrica (aFRR + mFRR, net; + = upward activation = deficit, − = downward = surplus). SETTLED rows: the published DAMAS activated energy (~16 min after the interval ends; tooltip = aFRR/mFRR split + IGCC netting). LIVE row: ~estimate from the live SEN feed — production vs plan, consumption vs plan, gas level, battery discharge, sold−plan deviation, plus the scheduled-mFRR flags (R² ≈ 0.5-0.6, typical error ≈ 100 MW). Settled rows keep the estimate frozen at interval end in brackets (green = within 100 MW) so the error stays visible. FUTURE rows: ⏫/⏬ = mFRR already scheduled for that interval (known ~20 min ahead).' },
+    { h: 'True Cross border', u: 'MW', help: 'Notif X-B + FRR: the cross-border position the physics would show if the operator had NOT activated balancing. Real X-B − Notif X-B understates a deficit once hydro/batteries/gas are activated (the flow is pulled back toward schedule); Real − True restores the pre-activation imbalance (shown as the small ± value; + = surplus, − = deficit). Uses the published FRR when settled, the live estimate otherwise.' },
     { h: 'Cross border Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
     { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
   ];
@@ -2495,7 +2529,7 @@ async function predictPage(date) {
       <td>${price !== null ? fmt(price) + ' <small class="cur">lei</small>' : (epImb !== null ? provPriceSpan(epImb) + ' <small class="cur">lei</small>' : '')}${gasTag(isp, tsMs >= gateMs && nowInfo.date === date)}</td><td>${sprdCell(isp, tsMs, gateMs)}</td>
       <td data-rprod="${isp}">${prodCellC}${dispProd !== null && mx ? prodMix(dispProd, mx.solar, mx.wind, mx.hydro, mx.nuclear, mx.gas, mx.coal != null ? mx.coal + (mx.biomass || 0) : null, mx.storage, stModes.get(isp)) : ''}</td><td${warmth(notifProd, prevNotifProd)}>${fmt(notifProd)}${notifProd !== null && prevNotifProd !== null ? ` <small class="${notifProd - prevNotifProd >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifProd - prevNotifProd >= 0 ? '+' : ''}${Math.round(notifProd - prevNotifProd)}</small>` : ''}${hydroMark}</td><td class="wx"><span class="wxw">${wxCell(WX.get(new Date(ts).toISOString().slice(0, 13)))}</span><span class="wxr">${resCell(resFc.get(isp), myFc.get(new Date(ts).toISOString().slice(0, 13)), solFc.get(isp))}</span></td><td data-wind="${isp}">${windCell(isp, tsMs)}</td><td>${dispProd !== null && notifProd !== null ? dlt(dispProd - notifProd) : ''}</td>
       <td data-rcons="${isp}">${dispCons !== null ? fmt(dispCons) + (plv != null && plv.cons != null ? ` <small class="${Math.abs(dispCons - plv.cons) <= 150 ? 'fc-ok' : 'fc-bad'}" title="consumption forecast as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${fmt(plv.cons)})</small>` : '') : fcstPredCell(fcstCons)}</td><td${warmth(notifCons, prevNotifCons)}>${fmt(notifCons)}${notifCons !== null && prevNotifCons !== null ? ` <small class="${notifCons - prevNotifCons >= 0 ? 'pos' : 'neg'}" title="change from the previous interval">${notifCons - prevNotifCons >= 0 ? '+' : ''}${Math.round(notifCons - prevNotifCons)}</small>` : ''}</td><td>${dispCons !== null && notifCons !== null ? dlt(dispCons - notifCons) : ''}</td>
-      <td data-rxb="${isp}"${xbTdAttr}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (() => { const xr = savedAvg.has(isp) ? savedAvg.get(isp) : rxb; if (xr === null) return fcstXBCell(fcstXB); return arrow(xr) + (plv && plv.xb != null ? ` <small class="xbf ${Math.abs(xr - plv.xb) <= 150 ? 'fc-ok' : 'fc-bad'}" title="Real X-B estimate as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${arrow(plv.xb)})</small>` : ''); })()}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td><td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
+      <td data-rxb="${isp}"${xbTdAttr}>${isLive ? ((liveSold !== null ? arrow(-liveSold) : '<small>…</small>') + (liveAvg !== null ? ` <span style="font-size:11px;font-weight:600" title="interval average of ${liveAvgN} polled readings">| ${arrow(liveAvg)}</span>` : '')) : (() => { const xr = savedAvg.has(isp) ? savedAvg.get(isp) : rxb; if (xr === null) return fcstXBCell(fcstXB); return arrow(xr) + (plv && plv.xb != null ? ` <small class="xbf ${Math.abs(xr - plv.xb) <= 150 ? 'fc-ok' : 'fc-bad'}" title="Real X-B estimate as recorded at the 75-min gate, vs realized (green = within 150 MW)">(${arrow(plv.xb)})</small>` : ''); })()}</td><td class="nxbcell" data-isp="${isp}" data-v="${nxb === null ? '' : Math.round(nxb)}"${warmth(nxb, prevNxb)}><span class="nxbval">${arrow(nxb)}</span>${xbChg.has(isp) ? ` <small class="${xbChg.get(isp) >= 0 ? 'pos' : 'neg'}" title="last intraday change to the notified cross-border (a PI trade): the market ${xbChg.get(isp) >= 0 ? 'SOLD — net export rose' : 'BOUGHT — net export fell'} by ${Math.abs(Math.round(xbChg.get(isp)))} MW">· ${xbChg.get(isp) >= 0 ? 'sold' : 'bought'} ${Math.abs(Math.round(xbChg.get(isp)))}</small>` : ''}${xbHist.has(isp) ? ` <span class="pi-i" data-isp="${isp}" title="show this interval's full PI-trade history">ⓘ</span>` : ''}</td><td>${arrow(xbBy(x, 'dayAhead'))}</td><td>${arrow(xbBy(x, 'intraday'))}</td><td>${arrow(xbBy(x, 'longTerm'))}</td>${balCells(isp, tsMs, nxb, isLive ? liveAvg : (savedAvg.has(isp) ? savedAvg.get(isp) : rxb))}<td data-xbd="${isp}">${isLive ? (xbDeltaLive !== null ? `<span title="live: interval average − Notif cross border">${dlt(xbDeltaLive)}</span>` : '') : (xbDeltaAvg !== null ? `<span title="real − notif from the SCADA time-weighted interval average (more accurate than the snapshot, verified vs ENTSO-E settled flows)">${dlt(xbDeltaAvg)}</span>` : (xbDeltaCell(xbAgg, isp) || (xbDeltaVal === null ? '' : dlt(xbDeltaVal))))}</td>
       <td>${dlt(notifProd !== null && notifCons !== null && nxb !== null ? notifProd - notifCons - nxb : null)}</td>
     </tr>`;
     // the CURRENT TRADE row (gate = first tradeable, ~75 min ahead) is a 3-deep block: row 1 = today (above, as is),

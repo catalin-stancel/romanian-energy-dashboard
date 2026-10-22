@@ -6,6 +6,7 @@ const { openDb } = require('./db');
 const sign = require('./sign_model');
 const res = require('./res_model');
 const spread = require('./spread_model');
+const bal = require('./bal_model');
 const db = openDb();
 db.exec('CREATE TABLE IF NOT EXISTS model_cache(name TEXT PRIMARY KEY, json TEXT, trained_at TEXT)');
 const up = db.prepare('INSERT INTO model_cache(name,json,trained_at) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET json=excluded.json, trained_at=excluded.trained_at');
@@ -14,4 +15,5 @@ const t = (name, fn) => { const s = Date.now(); try { const m = fn(); up.run(nam
 t('sign', () => sign.train(db));
 t('res', () => res.train(db));
 t('spread', () => spread.train(db));
+t('bal', () => bal.train(db));
 try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get(); console.log('wal_checkpoint(TRUNCATE) done'); } catch (e) { console.error('checkpoint:', e.message); }
