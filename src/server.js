@@ -2198,32 +2198,30 @@ async function predictPage(date) {
 
   // --- Wind column: live belt stations + fleet MW (live row), interval averages (settled), corrected forecast (forward)
   const WD = windObs.pageData(db, date, nowInfo);
-  const BD = balModel.pageData(db, date, nowInfo, liveIsp, getBalModel());
+  const BD = balModel.pageData(db, date, nowInfo, liveIsp, null);
   // Bal + True X-B cells. bal>0 = upward activation. real = the interval's Real X-B (live average or settled) for the Real−True readout.
   const balCells = (isp, tsMs, nxb, real) => {
+    // REAL DATA ONLY (no model estimate on the page). ⚡ = aFRR (automatic, battery-heavy, known ~16 min after the interval),
+    // ⏫/⏬ = mFRR up/down (scheduled mFRR is published by Transelectrica up to ~7 min BEFORE the interval → forward rows show it).
     const r0 = (v) => Math.round(v), sgn = (v) => (v >= 0 ? '+' : '−') + Math.abs(r0(v));
-    const pb = BD.pub.get(isp), lk = BD.lock.get(isp), sc = BD.sch.get(isp);
-    const ended = tsMs + 900000 <= nowMs, isLiveRow = nowInfo.date === date && isp === liveIsp;
-    const published = pb && (pb.any || ended && nowMs - (tsMs + 900000) > 40 * 60000);
-    let bal = null, cell = '', ttl = '';
+    const pb = BD.pub.get(isp);
+    const ended = tsMs + 900000 <= nowMs;
+    const aMw = pb ? 4 * (pb.aU - pb.aD) : 0, mMw = pb ? 4 * (pb.mU - pb.mD) : 0, net = pb ? pb.net : 0;
+    const published = ended && pb && (pb.any || nowMs - (tsMs + 900000) > 40 * 60000);
+    const mIcon = (v) => (v >= 0 ? '⏫' : '⏬');
+    const parts = [];
     if (published) {
-      bal = pb.act;
-      ttl = `published activated energy: aFRR +${r0(4 * pb.aU)} / −${r0(4 * pb.aD)} MW, mFRR +${r0(4 * pb.mU)} / −${r0(4 * pb.mD)} MW · IGCC netting ${sgn(pb.net)} MW (not in FRR — already inside Real X-B)`;
-      const br = lk && lk.act_est != null ? ` <small class="${Math.abs(lk.act_est - bal) <= 100 ? 'fc-ok' : 'fc-bad'}" title="live estimate frozen at interval end (${lk.n} feed readings) vs published">(${sgn(lk.act_est)})</small>` : '';
-      cell = `<span class="${bal >= 0 ? 'neg' : 'pos'}" title="${ttl}">${sgn(bal)}</span>${br}`;
-    } else if (isLiveRow && BD.live) {
-      bal = BD.live.act; const f = BD.live.f;
-      ttl = `LIVE estimate from ${BD.live.n} feed readings so far: prod vs plan ${sgn(f.prodDev)} · cons vs plan ${sgn(f.consDev)} · gas ${r0(f.gas)} MW · battery ${r0(f.storage)} MW · sold−plan ${sgn(f.dev)}${f.mUpSch ? ' · mFRR↑ scheduled' : ''}${f.mDnSch ? ' · mFRR↓ scheduled' : ''} · nowcast imbalance ${sgn(BD.live.imb)} MWh (R² ${BD.model && BD.model.imb ? BD.model.imb.r2 : '?'})`;
-      cell = `<span class="${bal >= 0 ? 'neg' : 'pos'}" style="font-style:italic" title="${ttl}">~${sgn(bal)}</span>`;
-    } else if (ended && lk && lk.act_est != null) {
-      bal = lk.act_est; cell = `<span style="font-style:italic;opacity:.8" title="live estimate frozen at interval end — DAMAS publication pending">~${sgn(bal)}</span>`;
-    } else if (!ended && sc && ((sc.up ?? 0) > 0 || (sc.dn ?? 0) > 0)) {
-      cell = `<span title="mFRR already scheduled for this interval (marginal price ${(sc.up ?? 0) > 0 ? '↑ ' + r0(sc.up) : '↓ ' + r0(sc.dn)} RON/MWh)">${(sc.up ?? 0) > 0 ? '⏫' : '⏬'} sch</span>`;
+      if (aMw || !mMw) parts.push(`<span class="${aMw > 0 ? 'neg' : aMw < 0 ? 'pos' : ''}" title="aFRR activated: up ${r0(4 * pb.aU)} MW / down ${r0(4 * pb.aD)} MW (automatic reserve, battery-heavy; published ~16 min after the interval)">⚡${sgn(aMw)}</span>`);
+      if (mMw) parts.push(`<span class="${mMw > 0 ? 'neg' : 'pos'}" title="mFRR activated: up ${r0(4 * pb.mU)} MW / down ${r0(4 * pb.mD)} MW (manual reserve, hydro/thermal)">${mIcon(mMw)}${Math.abs(r0(mMw))}</span>`);
+      if (net) parts.push(`<small title="IGCC imbalance netting with neighbouring TSOs: import ${r0(4 * pb.nI)} / export ${r0(4 * pb.nE)} MW — not part of FRR, already inside Real X-B">⇄${sgn(net)}</small>`);
+    } else if (mMw) {
+      parts.push(`<span class="${mMw > 0 ? 'neg' : 'pos'}" style="font-style:italic" title="mFRR activation SCHEDULED by Transelectrica for this interval (published up to ~7 min before it starts; aFRR comes on top and is only known afterwards)">${mIcon(mMw)}${Math.abs(r0(mMw))}</span>`);
     }
+    const bal = published ? aMw + mMw : (mMw || null);
     const tru = bal != null && nxb != null ? nxb + bal : null;
     const d = tru != null && real != null ? real - tru : null;
-    const tcell = tru == null ? '' : `<span title="Notif X-B ${sgn(nxb)} + FRR ${sgn(bal)}${d != null ? ' · Real − True = ' + sgn(d) + ' MW = imbalance before activation' : ''}">${arrow(tru)}</span>${d != null ? ' ' + dlt(d) : ''}`;
-    return `<td data-bal="${isp}">${cell}</td><td data-txb="${isp}">${tcell}</td>`;
+    const tcell = tru == null ? '' : `<span title="Notif X-B ${sgn(nxb)} + FRR ${sgn(bal)}${published ? '' : ' (scheduled mFRR only — aFRR not yet known)'}${d != null ? ' · Real − True = ' + sgn(d) + ' MW = imbalance before activation' : ''}">${arrow(tru)}</span>${d != null ? ' ' + dlt(d) : ''}`;
+    return `<td data-bal="${isp}">${parts.join(' ')}</td><td data-txb="${isp}">${tcell}</td>`;
   };
   const windCell = (isp, tsMs) => {
     const f1 = (v) => (v == null ? '' : (+v).toFixed(1));
@@ -2324,7 +2322,7 @@ async function predictPage(date) {
     { h: 'Cross border D-1', u: 'MW', help: 'Day-ahead component of the notified cross-border schedule (fixed at the day-ahead auction). ↑ = export, ↓ = import.' },
     { h: 'Cross border PI', u: 'MW', help: 'Intraday (PI) component of the notified cross-border — the revision from intraday border trades. Compare with X-B D-1 to see how much the intraday market shifted the position; big values = heavy intraday repositioning. ↑ = export, ↓ = import.' },
     { h: 'Cross border LT', u: 'MW', help: 'Long-term component of the notified cross-border (yearly + monthly capacity rights, nominated ahead of the day-ahead auction). Slowly varying — usually a steady net import on RO’s borders. This is the leg that makes Notif X-B ≠ D-1 + PI: Notif X-B = X-B D-1 + X-B PI + X-B LT. ↑ = export, ↓ = import.' },
-    { h: 'FRR', u: 'MW', help: 'Balancing energy being ACTIVATED by Transelectrica (aFRR + mFRR, net; + = upward activation = deficit, − = downward = surplus). SETTLED rows: the published DAMAS activated energy (~16 min after the interval ends; tooltip = aFRR/mFRR split + IGCC netting). LIVE row: ~estimate from the live SEN feed — production vs plan, consumption vs plan, gas level, battery discharge, sold−plan deviation, plus the scheduled-mFRR flags (R² ≈ 0.5-0.6, typical error ≈ 100 MW). Settled rows keep the estimate frozen at interval end in brackets (green = within 100 MW) so the error stays visible. FUTURE rows: ⏫/⏬ = mFRR already scheduled for that interval (known ~20 min ahead).' },
+    { h: 'FRR', u: 'MW', help: 'Balancing energy ACTIVATED by Transelectrica, real published data only (DAMAS activatedBalancingEnergyOverview). ⚡ = aFRR (automatic reserve, mostly batteries; + = up/deficit, − = down/surplus; published ~16 min after the interval ends). ⏫/⏬ = mFRR up/down (manual reserve, mostly hydro). Scheduled mFRR is published up to ~7 min BEFORE the interval starts, so running and future rows show it in italics — and the imbalance price of that interval tends to drop to the mFRR marginal price (~1,750 RON) from the aFRR level (5,000-6,500 RON) even if the deficit continues. ⇄ = IGCC netting with neighbouring TSOs (information only, not in FRR).' },
     { h: 'True Cross border', u: 'MW', help: 'Notif X-B + FRR: the cross-border position the physics would show if the operator had NOT activated balancing. Real X-B − Notif X-B understates a deficit once hydro/batteries/gas are activated (the flow is pulled back toward schedule); Real − True restores the pre-activation imbalance (shown as the small ± value; + = surplus, − = deficit). Uses the published FRR when settled, the live estimate otherwise.' },
     { h: 'Cross border Δ', u: 'MW', help: 'Realized imbalance = Real X-B − Notif X-B, shown for SETTLED intervals only (+ = surplus / more export than scheduled → softer price; − = deficit → firmer). Blank forward on purpose: a 14-day backtest showed forecasting it from prod/cons is ~2× WORSE than just trusting the schedule (worst at the sunset ramp), i.e. the forward imbalance is not forecastable this way. For the forward imbalance read, use the Imbalance column (DAMAS persistence, ~78% next-interval, ~2h).' },
     { h: 'Notif bal', u: 'MW', help: 'Notified plan balance = Notif prod − Notif cons − Notif X-B (net export). If the notified plan closes, this ≈ grid losses (small positive, ~+50–150 MW). Large or negative = the notified plan does not balance, or a basis offset between the prod/cons and exchange figures. NB: prod/cons are frozen D-1 but Notif X-B updates intraday, so this drifts as intraday border trades happen.' },
