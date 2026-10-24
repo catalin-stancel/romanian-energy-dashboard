@@ -2213,7 +2213,8 @@ async function predictPage(date) {
     if (published) {
       if (aMw || !mMw) parts.push(`<span class="${aMw > 0 ? 'neg' : aMw < 0 ? 'pos' : ''}" title="aFRR activated: up ${r0(4 * pb.aU)} MW / down ${r0(4 * pb.aD)} MW (automatic reserve, battery-heavy; published ~16 min after the interval)">⚡${sgn(aMw)}</span>`);
       if (mMw) parts.push(`<span class="${mMw > 0 ? 'neg' : 'pos'}" title="mFRR activated: up ${r0(4 * pb.mU)} MW / down ${r0(4 * pb.mD)} MW (manual reserve, hydro/thermal)">${mIcon(mMw)}${Math.abs(r0(mMw))}</span>`);
-      if (net) parts.push(`<small title="IGCC imbalance netting with neighbouring TSOs: import ${r0(4 * pb.nI)} / export ${r0(4 * pb.nE)} MW — not part of FRR, already inside Real X-B">⇄${sgn(net)}</small>`);
+      // border absorption (IGCC netting): green ↑ = we EXPORTED surplus to neighbours, red ↓ = we IMPORTED to cover a deficit (same colours as surplus/deficit)
+      if (net) parts.push(`<span class="${net < 0 ? 'pos' : 'neg'}" title="IGCC imbalance netting with neighbouring TSOs — how much of our imbalance the border absorbed: export ${r0(4 * pb.nE)} MW (surplus taken by neighbours) / import ${r0(4 * pb.nI)} MW (deficit covered by neighbours). Not part of FRR, already inside Real X-B">⇄${net < 0 ? '↑' : '↓'}${Math.abs(r0(net))}</span>`);
     } else if (mMw) {
       parts.push(`<span class="${mMw > 0 ? 'neg' : 'pos'}" style="font-style:italic" title="mFRR activation SCHEDULED by Transelectrica for this interval (published up to ~7 min before it starts; aFRR comes on top and is only known afterwards)">${mIcon(mMw)}${Math.abs(r0(mMw))}</span>`);
     }
