@@ -1446,7 +1446,7 @@ async function liveSEN(date, maxAge = 45000) {
           if (f.length < 12) continue;
           const m = /(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/.exec(f[0].trim());
           if (!m) continue;
-          const isp = Math.floor((+m[4] * 60 + +m[5]) / 15) + 1; // RO-local minutes → ISP (last sample wins)
+          const isp = senFilter.wallIsp(date, +m[4], +m[5]); // RO-local wall clock → ISP, DST-aware (last sample wins; autumn repeat hour collapses)
           map.set(isp, { cons: +f[1], prod: +f[3], sold: +f[4] });
         }
         if (map.size) { senCache[date] = { at: Date.now(), map }; graficBrk.markUp(); return map; }

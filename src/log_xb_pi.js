@@ -56,7 +56,7 @@ const EXPB = ['rohu', 'robg', 'rors', 'roua', 'romd'], IMPB = ['huro', 'bgro', '
     const sr = await fetch(su, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'X-Requested-With': 'XMLHttpRequest' } });
     if (sr.ok) {
       const tx = await sr.text();
-      for (const row of tx.split('|')) { const f = row.split(';'); if (f.length < 12) continue; const t = /(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/.exec(f[0].trim()); if (!t) continue; const isp = Math.floor((+t[4] * 60 + +t[5]) / 15) + 1; sen.set(isp, { prod: +f[3], cons: +f[1], sold: +f[4] }); }
+      for (const row of tx.split('|')) { const f = row.split(';'); if (f.length < 12) continue; const t = /(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/.exec(f[0].trim()); if (!t) continue; const isp = require('./sen_filter').wallIsp(riNow.date, +t[4], +t[5]); sen.set(isp, { prod: +f[3], cons: +f[1], sold: +f[4] }); }
     }
   } catch (e) { console.error('SEN fetch failed:', e.message); }
 

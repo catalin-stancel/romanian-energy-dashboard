@@ -52,11 +52,41 @@ const naiveMs = (s) => {
 // the RO-day interval (date YYYY-MM-DD + isp 1..96) a SCADA timestamp belongs to — position in the local day,
 // no tz math. Used so the live Real-X-B value lands in the interval its SCADA time falls in, not the wall-clock one.
 // Built on the SAME disambiguated parse (naive ms are Bucharest wall-clock treated as UTC, so UTC getters = local parts).
+// ---- DST-aware wall-clock ↔ ISP mapping (2026-10-25 fix) ----
+// The RO day has 96 ISPs, except the clock-change Sundays: spring (03:00 skipped) = 92, autumn (03:00-04:00 twice) = 100.
+// Counting quarter-hours from midnight on the wall clock mislabels every reading after the change by 4 ISPs (seen
+// 2026-10-25: the live Real X-B sat 4 rows behind the current interval all day). These helpers do the bookkeeping.
+const bucharestOffsetMs = (utcMs) => { // UTC offset of Europe/Bucharest at a true instant (2h winter / 3h summer)
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Bucharest', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(new Date(utcMs));
+  const g = {}; for (const x of p) g[x.type] = +x.value;
+  return Date.UTC(g.year, g.month - 1, g.day, g.hour === 24 ? 0 : g.hour, g.minute, g.second) - utcMs;
+};
+const dayIsps = (dateRo) => { // 96 / 92 (spring) / 100 (autumn) for a RO calendar date
+  const [Y, M, D] = dateRo.split('-').map(Number); const mid = Date.UTC(Y, M - 1, D, 0, 0, 0);
+  const a = bucharestOffsetMs(mid - 3600000), b = bucharestOffsetMs(mid + 23 * 3600000); // 01:00-ish vs 23:00-ish wall clock
+  return a === b ? 96 : a < b ? 92 : 100;
+};
+// wall-clock hh:mm on dateRo → ISP. secondPass: on the autumn day, 03:00-04:00 happens twice; true when the reading is from the repeat.
+const wallIsp = (dateRo, hh, mm, secondPass = false) => {
+  const m = hh * 60 + mm, q = Math.floor(m / 15) + 1, n = dayIsps(dateRo);
+  if (n === 96) return q;
+  if (n === 92) return m >= 240 ? q - 4 : q;                       // spring: 03:00-04:00 does not exist
+  if (m < 180) return q; if (m >= 240) return q + 4;                // autumn: after the repeat, 4 extra ISPs
+  return q + (secondPass ? 4 : 0);                                  // inside the repeated hour
+};
+// ISP on dateRo → wall-clock minutes from midnight of the interval start (autumn second pass maps to the same wall time)
+const wallStartMin = (dateRo, isp) => {
+  const n = dayIsps(dateRo);
+  if (n === 96) return (isp - 1) * 15;
+  if (n === 92) return isp <= 12 ? (isp - 1) * 15 : (isp + 3) * 15;
+  if (isp <= 12) return (isp - 1) * 15; if (isp <= 16) return 180 + (isp - 13) * 15; if (isp <= 20) return 180 + (isp - 17) * 15; return (isp - 5) * 15;
+};
 const tsInterval = (s) => {
   const t = naiveMs(s);
   if (t == null) return null;
-  const d = new Date(t);
-  return { date: d.toISOString().slice(0, 10), isp: Math.floor((d.getUTCHours() * 60 + d.getUTCMinutes()) / 15) + 1 };
+  const d = new Date(t); const date = d.toISOString().slice(0, 10);
+  const secondPass = bucharestOffsetMs(Date.now()) === 7200000; // live reading inside the repeated hour: winter offset already in force → second pass
+  return { date, isp: wallIsp(date, d.getUTCHours(), d.getUTCMinutes(), secondPass) };
 };
 
 async function fetchSenFilter() {
@@ -121,7 +151,7 @@ function roWallMs() {
 }
 function intervalAvg(db, dateRo, isp) {
   const [Y, Mo, D] = dateRo.split('-').map(Number);
-  const tStart = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + (isp - 1) * 900000;
+  const tStart = Date.UTC(Y, Mo - 1, D, 0, 0, 0) + wallStartMin(dateRo, isp) * 60000; // DST-aware (autumn repeat hour overlaps — accepted)
   const tFull = tStart + 900000;
   // End the integration at the latest SCADA timestamp ("scada now"), NOT the wall clock — so the denominator is the
   // seconds ELAPSED BY SCADA TIME (latest SCADA ts − interval start), and the last reading is never extrapolated
@@ -181,4 +211,4 @@ function backfillIntervals(db, { maxNew = 500, refinishMin = 4 } = {}) {
   return n;
 }
 
-module.exports = { fetchSenFilter, ensureTable, record, naiveMs, tsInterval, intervalAvg, ensureIntervalTable, saveIntervalAvg, backfillIntervals, roWallMs, DECODE, URL };
+module.exports = { fetchSenFilter, ensureTable, record, naiveMs, tsInterval, intervalAvg, ensureIntervalTable, saveIntervalAvg, backfillIntervals, roWallMs, DECODE, URL, wallIsp, wallStartMin, dayIsps };
