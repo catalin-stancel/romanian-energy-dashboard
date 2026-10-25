@@ -66,13 +66,16 @@ function loadConfig() {
 }
 
 const pad = (n) => String(n).padStart(2, '0');
-const ispLabel = (isp) => `${pad(Math.floor((isp - 1) / 4))}:${['00', '15', '30', '45'][(isp - 1) % 4]}`;
+// RO wall-clock of the ISP start. With a date, DST days are handled (92/100 ISPs) via senFilter.wallStartMin; the autumn repeat hour is marked ².
+const wallMin = (isp, date) => (date ? senFilter.wallStartMin(date, isp) : (isp - 1) * 15);
+const repeatMark = (isp, date) => (date && isp >= 17 && isp <= 20 && senFilter.dayIsps(date) === 100 ? '<small>²</small>' : '');
+const ispLabel = (isp, date) => { const m = wallMin(isp, date); return `${pad(Math.floor(m / 60))}:${pad(m % 60)}${repeatMark(isp, date)}`; };
 // market time (CET) of the ISP start; ISPs 1-4 fall on the previous CET evening
-const cetLabel = (isp) => {
-  let m = (isp - 1) * 15 - 60;
+const cetLabel = (isp, date) => {
+  let m = wallMin(isp, date) - 60; // CET = RO − 1 h on every day (both zones switch the same night)
   const prev = m < 0;
   if (prev) m += 1440;
-  return `${pad(Math.floor(m / 60))}:${pad(m % 60)}${prev ? '<small>−1d</small>' : ''}`;
+  return `${pad(Math.floor(m / 60))}:${pad(m % 60)}${prev ? '<small>−1d</small>' : ''}${repeatMark(isp, date)}`;
 };
 const addDays = (dateStr, n) => new Date(new Date(dateStr + 'T12:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10);
 const euDate = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)}`;
@@ -193,7 +196,7 @@ function histRowHtml(d, isp, label, last, gate) {
   const xbd = (rxb != null && nxb != null) ? rxb - nxb : null;
   // weather as it was at that interval's hour
   let wxTxt = ''; try { const t = dayTimestamps(d).find((x) => x.isp === isp); if (t) { const wx = wxAtHour(new Date(t.ts).toISOString().slice(0, 13) + ':00:00Z'); if (wx && (wx.cloud != null || wx.windReal != null)) wxTxt = `${skyIcon(wx.cloud)}${wx.windReal != null ? ' 💨' + Math.round(wx.windReal) : ''}`; } } catch { /* ignore */ }
-  return `<tr class="histrow ${gate ? 'hg' : 'hx'}${last ? ' histrow-last' : ''}" data-pisp="${isp}"><td title="same interval, ${d}"><span class="histlbl">${label}</span></td><td><small>${cetLabel(isp)}</small></td>`
+  return `<tr class="histrow ${gate ? 'hg' : 'hx'}${last ? ' histrow-last' : ''}" data-pisp="${isp}"><td title="same interval, ${d}"><span class="histlbl">${label}</span></td><td><small>${cetLabel(isp, d)}</small></td>`
     + `<td>${imb !== null ? dirIcon(imb > 0) + ' ' + f(Math.abs(imb)) : ''}</td>`
     + `<td>${price !== null ? f(price) + ' <small class="cur">lei</small>' : ''}</td>`
     + `<td>${rprodCell}</td><td>${f(np)}</td><td>${wxTxt}</td><td>${wsRec != null ? '💨' + (+wsRec).toFixed(1) + ' m/s' + (rwi != null ? ' · ' : '') : ''}${rwi != null ? f(rwi) + ' MW' : ''}</td><td></td>`
@@ -351,7 +354,7 @@ function pzuData(date) {
       ? qty * (imbPrice - pzuRon) : null;
     const es = ext.get(isp);
     return {
-      isp, eet: ispLabel(isp), cet: cetLabel(isp),
+      isp, eet: ispLabel(isp, date), cet: cetLabel(isp, date),
       // desk covers all 24h → any interval with a desk signal is tradeable (night = BUY/HOLD only, enforced upstream)
       inWindow: es ? true : (isp >= ispFrom && isp <= ispTo),
       deskSig: es ? es.sig : null, deskQ: es != null ? es.q : null,
@@ -1266,7 +1269,7 @@ function piPage(date) {
     const lastClass = imbPrice !== null && imbPrice < 0 ? 'lastneg' : 'lastpos';
     const winClass = (isp === winFrom ? ' winstart' : '') + (isp === winTo ? ' winend' : '');
     return `<tr class="${isCurrent ? 'now' : isp === lastRealIsp ? lastClass : priceClass}${winClass}">
-      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>
+      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp, date)}</td>
       <td class="${isFc ? 'fc' : ''}">${typeC}</td>
       <td class="${isFc ? 'fc' : ''}">${qtyC}</td>
       <td class="${isFc ? 'fc' : ''}">${priceC}</td>
@@ -1333,7 +1336,7 @@ function widgetData() {
     const imb = sv('damas_est_sys_imbalance', ts);
     if (imbPrice !== null && imb !== null) {
       intervals.push({
-        cet: cetLabel(isp).replace(/<[^>]+>/g, ''),
+        cet: cetLabel(isp, roDateIsp(new Date()).date).replace(/<[^>]+>/g, ''),
         dir: imb > 0 ? 'S' : 'D',
         qty: Math.round(Math.abs(imb)),
         price: Math.round(imbPrice),
@@ -2067,7 +2070,7 @@ async function predictPage(date) {
   const curIspStartMs = curIspTs ? new Date(curIspTs.ts).getTime() : nowMs;
   const gateMs = curIspStartMs + LOCK_LEAD_MIN * 60000;
   const firstOpenIsp = nowInfo.isp + LOCK_LEAD_MIN / 15; // current ISP + 5
-  const gateCet = firstOpenIsp <= 96 ? cetLabel(firstOpenIsp) : '00:00<small>+1d</small>';
+  const gateCet = firstOpenIsp <= dayTimestamps(date).length ? cetLabel(firstOpenIsp, date) : '00:00<small>+1d</small>';
   const gateCaption = nowInfo.date === date
     ? `<b>Trade gate</b> · ${LOCK_LEAD_MIN}-min lead — <span class="op">▶ trade window opens at ${gateCet}</span>, locks in <span class="ivtimer" data-end="${curIspStartMs + 900000}">–:––</span> · <span class="lk">🔒 nearer intervals locked</span> · <span style="opacity:.6">grey = delivered</span>`
     : (date < nowInfo.date ? '<b>Past day</b> — all intervals delivered' : '<b>Future day</b> — all intervals open to trade');
@@ -2507,7 +2510,7 @@ async function predictPage(date) {
         if (u.hi == null && u.he == null && u.bi == null && u.be == null) return '';
         const f = (v) => (v == null ? '–' : `<span${v >= 90 ? ' style="color:var(--neg,#d93a30);font-weight:700"' : v >= 75 ? ' style="color:#d2691e;font-weight:600"' : ''}>${v}</span>`);
         return ` <small class="xbutil" title="border capacity used this interval — H = Hungary import/export (vs the OFFICIAL flow-based max bilateral exchange, JAO Core, hourly), B = Bulgaria import/export (vs official NTC). Amber ≥75%, red ≥90%. Readings >100% = the commercial paper exceeds the official net max (netted/virtual schedules — the physical flow cannot).">H${f(u.hi)}/${f(u.he)} B${f(u.bi)}/${f(u.be)}</small>`;
-      })()}</td><td style="white-space:nowrap">${cetLabel(isp)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
+      })()}</td><td style="white-space:nowrap">${cetLabel(isp, date)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
       <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` + (plv != null && plv.lean != null ? ` <small class="xbf ${Math.sign(plv.lean) === Math.sign(imb) ? 'fc-ok' : 'fc-bad'}" title="imbalance lean as recorded at the 75-min gate, vs realized (green = sign matched)">(${plv.lean > 0 ? 'S' : 'D'} ${fmt(Math.abs(plv.lean))})</small>` : '') : (() => {
         // forward imbalance value = the PHYSICAL-IDENTITY lean (user-spec 2026-07-03): (Fcst Real X-B − Notif X-B)/4 MWh.
         // Honest caveat baked into the tooltip: at the 75-min lead this lean's SIGN is ~coin-flip (52% validated,
@@ -2918,7 +2921,7 @@ async function piLearnPage(date, frameTs) {
     const lastClass = price !== null && price < 0 ? 'lastneg' : 'lastpos';
     const cls = ((isCurrent ? 'now' : isp === lastRealIsp ? lastClass : '') + (ts === frameTs ? ' rowsel' : '')).trim();
     return `<tr class="${cls}" onclick="location='/pilearn?date=${date}&frame=${encodeURIComponent(ts)}'">
-      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp)}</td>
+      <td><b>${isp}</b>${isCurrent ? ' ▶' : isp === lastRealIsp ? ' ●' : ''}</td><td>${cetLabel(isp, date)}</td>
       <td>${imb !== null ? dirIcon(imb > 0) : ''}</td>
       <td>${imb !== null ? Math.round(Math.abs(imb)) : ''}</td>
       <td>${price !== null ? Math.round(price) : (epImb !== null ? provPriceSpan(epImb) : '')}</td>
