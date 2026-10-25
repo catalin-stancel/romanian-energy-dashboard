@@ -2584,6 +2584,8 @@ ${body}</table></div>
 <script>(function(){
   // Near-realtime partial refresh: re-fetch this page, swap ONLY the table body in place (no full
   // reload → no flash, scroll kept), and re-apply the colPicker column hiding to the fresh cells.
+  // On load / full refresh: bring the CURRENT interval's row to the centre of the view (today only — past days have no 'now' row).
+  (function(){var done=0;function go(){var r=document.querySelector('tr.now')||document.querySelector('tr.liverow');if(!r||!r.scrollIntoView)return;try{r.scrollIntoView({block:'center'});}catch(e){r.scrollIntoView();}}go();window.addEventListener('load',function(){go();setTimeout(go,700);setTimeout(go,2000);});})();
   var POLL=15000;
   function dot(c){var d=document.getElementById('rtdot');if(d)d.style.color=c;}
   function tick(){
