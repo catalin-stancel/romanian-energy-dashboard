@@ -75,16 +75,20 @@ function decide(f, forNext) {
   if (mUp > 0) { s += 1; why.push(`mFRR up ${r0(mUp)} MW scheduled ${forNext ? 'for the next interval' : 'this interval'} (price pinned ≥ ~1,750 while the deficit lasts)`); }
   if (mDn >= 300) { s -= 2; why.push(`mFRR down ${r0(mDn)} MW scheduled ${forNext ? 'for the next interval' : 'this interval'} — ${mDn >= 450 ? '73%' : '60%'} negative price historically`); }
   else if (mDn > 0) { s -= 1; why.push(`mFRR down ${r0(mDn)} MW scheduled ${forNext ? 'for the next interval' : 'this interval'}`); }
+  // published price / aFRR are 2+ intervals old: persistence evidence, so they only vote WITH the live sign (a visible flip beats them;
+  // 2026-10-28 13:15 RO: +105 MW live surplus was cancelled by a 2,085 RON price from the deficit two intervals earlier → wrong STOP)
+  const liveDef = dev <= -40, liveSur = dev >= 40;
   if (f.lastPrice != null && f.lastPriceAge <= 5) {
-    if (f.lastPrice > 1500) { s += 1; why.push(`last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago)`); }
-    else if (f.lastPrice < 100) { s -= 1; why.push(`last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago)`); }
+    if (f.lastPrice > 1500 && liveDef) { s += 1; why.push(`last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago) confirms`); }
+    else if (f.lastPrice < 100 && liveSur) { s -= 1; why.push(`last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago) confirms`); }
+    else if ((f.lastPrice > 1500 && liveSur) || (f.lastPrice < 100 && liveDef)) why.push(`last published price ${r0(f.lastPrice)} RON is from the other regime (${f.lastPriceAge} ISP ago) — ignored, live sign wins`);
   }
   if (f.lastAfrr != null) {
-    if (f.lastAfrr > 150) { s += 1; why.push(`last published aFRR up ${r0(f.lastAfrr)} MW`); }
-    else if (f.lastAfrr < -150) { s -= 1; why.push(`last published aFRR down ${r0(-f.lastAfrr)} MW`); }
+    if (f.lastAfrr > 150 && liveDef) { s += 1; why.push(`last published aFRR up ${r0(f.lastAfrr)} MW confirms`); }
+    else if (f.lastAfrr < -150 && liveSur) { s -= 1; why.push(`last published aFRR down ${r0(-f.lastAfrr)} MW confirms`); }
   }
   if (f.hydro != null && f.hydro < 400 && dev > 40) { s -= 1; why.push(`hydro at floor (${r0(f.hydro)} MW) — no cheap down-regulation left, crash tail doubles`); }
-  const strongAt = forNext ? 4 : 3, leanAt = forNext ? 3 : 2;
+  const strongAt = forNext ? 4 : 3, leanAt = forNext ? 2 : 1;
   let action = 'HOLD', strength = null;
   if (s >= leanAt) { action = 'DISCHARGE'; strength = s >= strongAt ? 'strong' : 'lean'; }
   else if (s <= -leanAt) { action = 'CHARGE'; strength = s <= -strongAt ? 'strong' : 'lean'; }
