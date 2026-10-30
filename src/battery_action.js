@@ -32,6 +32,10 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
     const s1 = db.prepare('SELECT AVG(storage) v FROM sen_live WHERE ts_ms>? AND storage IS NOT NULL').get(t - 180000);
     const s0 = db.prepare('SELECT AVG(storage) v FROM sen_live WHERE ts_ms>? AND ts_ms<=? AND storage IS NOT NULL').get(t - 360000, t - 180000);
     if (s1 && s0 && s1.v != null && s0.v != null) f.stSlope = s1.v - s0.v;
+    // wind fleet change over the last 10 min (MW): a drop matching a running mFRR-down = the activation landing on wind farms
+    const w1 = db.prepare('SELECT AVG(wind) v FROM sen_live WHERE ts_ms>? AND wind IS NOT NULL').get(t - 120000);
+    const w0 = db.prepare('SELECT AVG(wind) v FROM sen_live WHERE ts_ms>? AND ts_ms<=? AND wind IS NOT NULL').get(t - 720000, t - 600000);
+    f.wind10 = w1 && w0 && w1.v != null && w0.v != null ? w1.v - w0.v : null;
   } catch { /* table/column may be missing */ }
   if (sf) {
     if (sf.sold != null && sf.plan != null) f.devNow = sf.plan - sf.sold;
@@ -39,6 +43,12 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
     if (sf.storage != null) f.storage = sf.storage;
     if (sf.hydro != null) f.hydro = sf.hydro;
   }
+  try {
+    const np = db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_notif_prod' AND isp IN (?,?,?)").all(date, isp - 1, isp, isp + 1);
+    const m = new Map(np.map((r) => [r.isp, r.value]));
+    f.planStepL = m.has(isp) && m.has(isp - 1) ? m.get(isp) - m.get(isp - 1) : null;
+    f.planStepN = m.has(isp + 1) && m.has(isp) ? m.get(isp + 1) - m.get(isp) : null;
+  } catch { f.planStepL = f.planStepN = null; }
   const mw = (o, k) => (o && o[k] ? 4 * o[k] : 0);
   const pL = pub && pub.get(isp), pN = pub && pub.get(isp + 1);
   f.mUpL = mw(pL, 'mU'); f.mDnL = mw(pL, 'mD'); f.mUpN = mw(pN, 'mU'); f.mDnN = mw(pN, 'mD');
@@ -56,10 +66,20 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
 // same live state (persistence 0.93–0.97) but its own scheduled mFRR and a higher bar.
 function decide(f, forNext) {
   const why = []; let s = 0;
-  const dev = f.devTrue != null ? f.devTrue : f.dev, devNow = f.devNowTrue != null ? f.devNowTrue : f.devNow;
+  let dev = f.devTrue != null ? f.devTrue : f.dev, devNow = f.devNowTrue != null ? f.devNowTrue : f.devNow;
   if (dev == null) return { action: 'HOLD', strength: null, score: 0, reasons: ['no live deviation reading'] };
   const r0 = (v) => Math.round(v);
-  const act = f.mUpL - f.mDnL; if (act) why.push(`pre-activation read: sold−plan ${f.dev >= 0 ? '+' : ''}${r0(f.dev)} MW − mFRR ${act >= 0 ? '+' : ''}${r0(act)} MW activated = ${dev >= 0 ? '+' : ''}${r0(dev)} MW (Real − True X-B)`);
+  // OVERSHOOT override (2026-10-29 04:30 CET): 220 MW mFRR-down scheduled against a fading +100 MW surplus → the system went −200 MW
+  // and the batteries ramped 1→111 MW (aFRR up). The final direction was deficit, price 2,727 (aFRR-up VWAP), the down activation
+  // excluded as counter-activation. So: raw deficit + batteries ramping while mFRR-down runs = deficit, no correction.
+  const ramping = f.stMode === 'bal' || (f.stSlope != null && f.stSlope >= 40) || (f.storage != null && f.storage >= 80 && f.stSlope != null && f.stSlope > 0);
+  let overshoot = false;
+  // curtailment-induced deficit (user 2026-10-29): wind fell ≈ the scheduled down amount → the TSO curtailed wind against a surplus that
+  // had already gone; the system crosses into deficit and aFRR up (batteries) is paid to fix it. Artificial, but it sets the price.
+  const curtailed = f.mDnL > 0 && f.wind10 != null && f.wind10 <= -150 && f.dev != null && f.dev < 0;
+  if (curtailed) why.push(`wind fleet ${r0(f.wind10)} MW in 10 min while ${r0(f.mDnL)} MW mFRR-down runs — curtailment-induced deficit (artificial, operator overshoot)`);
+  if (f.mDnL > 0 && f.dev != null && f.dev <= -80 && (ramping || curtailed || f.dev <= -150)) { /* a raw deficit of 150+ MW while down-regulation runs is itself the overshoot tell */ dev = f.dev; devNow = f.devNow; overshoot = true; why.push(`OVERSHOOT: ${r0(f.mDnL)} MW mFRR-down running but the raw deviation is ${r0(f.dev)} MW and the batteries are ramping (aFRR up firing) — final direction deficit, no activation correction`); }
+  const act = f.mUpL - f.mDnL; if (act && !overshoot) why.push(`pre-activation read: sold−plan ${f.dev >= 0 ? '+' : ''}${r0(f.dev)} MW − mFRR ${act >= 0 ? '+' : ''}${r0(act)} MW activated = ${dev >= 0 ? '+' : ''}${r0(dev)} MW (Real − True X-B)`);
   if (dev <= -150) { s += 2; why.push(`live deficit ${r0(-dev)} MW`); }
   else if (dev <= -80) { s += 1; why.push(`mild live deficit ${r0(-dev)} MW`); }
   else if (dev >= 150) { s -= 2; why.push(`live surplus +${r0(dev)} MW`); }
@@ -71,7 +91,14 @@ function decide(f, forNext) {
   }
   if (f.stMode === 'bal' || (f.stSlope != null && f.stSlope >= 40)) { s += 1; why.push(f.stMode === 'bal' ? 'batteries in balancing mode (output tracking the import over plan = aFRR up)' : `batteries ramping +${r0(f.stSlope)} MW in 3 min`); }
   else if (f.stSlope != null && f.stSlope <= -40 && f.storage != null && f.storage < 60) { s -= 1; why.push(`batteries backing off (${r0(f.stSlope)} MW in 3 min) — aFRR up ending`); }
-  const mUp = forNext ? f.mUpN : f.mUpL, mDn = forNext ? f.mDnN : f.mDnL;
+  let mUp = forNext ? f.mUpN : f.mUpL, mDn = forNext ? f.mDnN : f.mDnL;
+  // plan-driven dispatch step of the target interval (notified production vs the previous interval): ≥300 MW votes with the sign it creates
+  const ps = forNext ? f.planStepN : f.planStepL;
+  if (ps != null && ps >= 300 && dev >= 40) { s -= 1; why.push(`notified production steps +${r0(ps)} MW ${forNext ? 'next interval' : 'this interval'} (plan dispatch) — surplus pressure`); }
+  else if (ps != null && ps <= -300 && dev <= -40) { s += 1; why.push(`notified production steps ${r0(ps)} MW ${forNext ? 'next interval' : 'this interval'} (plan dispatch) — deficit pressure`); }
+  else if (ps != null && Math.abs(ps) >= 300) why.push(`notified production steps ${ps >= 0 ? '+' : ''}${r0(ps)} MW ${forNext ? 'next interval' : 'this interval'} — watch for a flip`);
+  if (overshoot) mDn = 0; // a counter-activation has no price effect — it must not vote
+  if (curtailed && !forNext) { s += 1; }
   if (mUp > 0) { s += 1; why.push(`mFRR up ${r0(mUp)} MW scheduled ${forNext ? 'for the next interval' : 'this interval'} (price pinned ≥ ~1,750 while the deficit lasts)`); }
   if (mDn >= 300) { s -= 2; why.push(`mFRR down ${r0(mDn)} MW scheduled ${forNext ? 'for the next interval' : 'this interval'} — ${mDn >= 450 ? '73%' : '60%'} negative price historically`); }
   else if (mDn > 0) { s -= 1; why.push(`mFRR down ${r0(mDn)} MW scheduled ${forNext ? 'for the next interval' : 'this interval'}`); }
