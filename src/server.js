@@ -3036,6 +3036,25 @@ const server = http.createServer(async (req, res) => {
 
     // unauthenticated routes
     if (url.pathname === '/health') return json({ ok: true, ts: new Date().toISOString() });
+    if (url.pathname === '/api/dbdump') {
+      // key-authenticated, RESUMABLE table dump for migrating the SQLite history to another database (2026-10-30):
+      //   ?schema=1                       → tables (CREATE SQL, row count, max rowid) + index SQL
+      //   ?table=T&after=ROWID&limit=N    → gzip NDJSON of rows with rowid > after, ascending (≤ 50k per call keeps the sync read short)
+      if (url.searchParams.get('key') !== WIDGET_KEY) return send(401, 'application/json', '{"error":"bad key"}');
+      if (url.searchParams.get('schema')) {
+        const tables = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
+          .map((t) => ({ name: t.name, sql: t.sql, ...db.prepare(`SELECT COUNT(*) n, MAX(rowid) maxRowid FROM "${t.name}"`).get() }));
+        const indexes = db.prepare("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL ORDER BY name").all();
+        return send(200, 'application/json', JSON.stringify({ tables, indexes, at: new Date().toISOString() }));
+      }
+      const table = url.searchParams.get('table') || '';
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return send(404, 'application/json', '{"error":"no such table"}');
+      const after = Number(url.searchParams.get('after') || 0), limit = Math.min(50000, Math.max(1, Number(url.searchParams.get('limit') || 20000)));
+      const rows = db.prepare(`SELECT rowid AS __rowid, * FROM "${table}" WHERE rowid > ? ORDER BY rowid LIMIT ?`).all(after, limit);
+      const body = require('zlib').gzipSync(rows.map((r) => JSON.stringify(r)).join(String.fromCharCode(10)));
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Encoding': 'gzip', 'X-Rows': String(rows.length), 'X-Last-Rowid': String(rows.length ? rows[rows.length - 1].__rowid : after) });
+      return res.end(body);
+    }
     if (url.pathname === '/api/widget') {
       // key-authenticated summary for iOS lock/home-screen widgets (Scriptable can't do cookies)
       if (url.searchParams.get('key') !== WIDGET_KEY) return send(401, 'application/json', '{"error":"bad key"}');
