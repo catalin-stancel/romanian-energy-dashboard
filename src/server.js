@@ -3043,7 +3043,7 @@ const server = http.createServer(async (req, res) => {
       if (url.searchParams.get('key') !== WIDGET_KEY) return send(401, 'application/json', '{"error":"bad key"}');
       if (url.searchParams.get('schema')) {
         const tables = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
-          .map((t) => ({ name: t.name, sql: t.sql, ...db.prepare(`SELECT COUNT(*) n, MAX(rowid) maxRowid FROM "${t.name}"`).get() }));
+          .map((t) => ({ name: t.name, sql: t.sql, ...db.prepare(`SELECT MAX(rowid) maxRowid FROM "${t.name}"`).get() })); // no COUNT(*): a full scan of the 19M-row weather table blocked the event loop long enough for Render's health check to restart the service (2026-10-30)
         const indexes = db.prepare("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL ORDER BY name").all();
         return send(200, 'application/json', JSON.stringify({ tables, indexes, at: new Date().toISOString() }));
       }
