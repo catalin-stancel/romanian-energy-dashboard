@@ -57,6 +57,21 @@ async function main() {
   db.exec('CREATE TABLE IF NOT EXISTS weather_hourly(ts_utc TEXT, var TEXT, value REAL, pulled_at TEXT, PRIMARY KEY(ts_utc,var))');
   const nh = db.prepare('INSERT OR REPLACE INTO weather_hourly(ts_utc,var,value,pulled_at) SELECT ts_utc, var, AVG(value), pulled_at FROM weather WHERE pulled_at=? GROUP BY ts_utc, var').run(pulledAt);
   console.log(`weather_hourly refreshed: ${nh.changes} (ts,var) rows from this run`);
+  // RETENTION (2026-10-30): raw runs older than WEATHER_KEEP_DAYS (default 90) go; weather_hourly keeps the latest-run mean for
+  // every hour forever, which is what the pages and the RES model read. One bounded batch per hourly run (20k rows > the ~6k/h
+  // inflow) so the delete never holds the lock long or grows the WAL on the nearly full Render disk. The one-off backlog was
+  // pruned by hand (5.7M rows) the same day. Freed pages are reused, the file does not shrink (no VACUUM on a 2 GB container).
+  const keepDays = Number(process.env.WEATHER_KEEP_DAYS || 90);
+  if (keepDays > 0) {
+    const cut = new Date(Date.now() - keepDays * 86400000).toISOString().slice(0, 16) + 'Z';
+    const del = db.prepare('DELETE FROM weather WHERE rowid IN (SELECT rowid FROM weather WHERE pulled_at < ? LIMIT 20000)');
+    let deleted = 0;
+    for (let i = 0; i < 5; i++) { // up to 5 short batches per run: a backlog drains at ~100k rows/h, steady state is one batch
+      beginImmediate(db); const n = del.run(cut).changes; db.exec('COMMIT');
+      deleted += n; if (n < 20000) break;
+    }
+    if (deleted) console.log(`retention: deleted ${deleted} raw weather rows pulled before ${cut}`);
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
