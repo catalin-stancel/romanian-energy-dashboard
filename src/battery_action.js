@@ -122,6 +122,13 @@ function decide(f, forNext) {
   // direction-only guard: never act against the visible sign (that is the one pattern that reads as an intentional imbalance)
   if (action === 'DISCHARGE' && dev > -40) { action = 'HOLD'; strength = null; why.push('→ HOLD: deficit evidence but the live sign is not in deficit'); }
   if (action === 'CHARGE' && dev < 40 && mDn < 300) { action = 'HOLD'; strength = null; why.push('→ HOLD: surplus evidence but the live sign is not in surplus'); }
+  // MAGNITUDE cap (review 2026-11-02 of 465 settled calls): when the raw and the pre-activation deviations disagree in sign, the
+  // pre-activation read wins 16/21 — but ONLY when it is the larger of the two. In every case where the raw deviation matched or
+  // exceeded it, the interval settled within 10 MW of zero or went the raw way (2026-10-30 ISP 69/70: raw +274 vs −126 after 400 MW
+  // mFRR up → settled +49 surplus, strong DISCHARGE lost 600 RON/MWh). Keep the direction, never call it strong.
+  if (strength === 'strong' && !overshoot && f.dev != null && Math.sign(f.dev) !== Math.sign(dev) && Math.abs(f.dev) >= 40 && Math.abs(f.dev) >= Math.abs(dev)) {
+    strength = 'lean'; why.push(`→ lean only: the raw deviation (${f.dev >= 0 ? '+' : ''}${r0(f.dev)} MW) is as large as the pre-activation read — the activation may be overshooting`);
+  }
   return { action, strength, score: s, reasons: why };
 }
 
