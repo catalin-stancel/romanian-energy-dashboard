@@ -11,7 +11,11 @@
 const { roDateIsp } = require('./db');
 
 const BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/publicReport/';
-const THR = 200;      // MW of mFRR activation in the interval (DAMAS publishes MWh per 15 min → ×4)
+// Triggers (MW of mFRR activation in the ending interval; DAMAS publishes MWh per 15 min → ×4). Sweep 2026-11-02 at the trade-row lag,
+// scored at the limit price: BUY edge starts at 300 MW (THR 300: 206 calls, 70% win, +139 RON/MWh avg; <200 MW ≈ coin flip at
+// 1.25× PZU); SELL best at 200 MW (251 calls, 78%, +48 avg; the 400–600 MW down band loses: big down activations get reversed).
+const THR_BUY = 300, THR_SELL = 200;
+const THR = THR_SELL; // kept for the page (lowest trigger)
 const SIZE = 0.25;    // MWh per interval
 const WINDOW_MIN = 10; // decision window opens at minute 10 of the interval (final 5 minutes)
 // PI PRICE LIMITS (user 2026-11-02, applied by hand until PI prices are integrated): BUY only if PI ≤ 1.25× PZU — the deficit price in
@@ -22,6 +26,7 @@ const piLimit = (action, pzu) => pzu == null ? null : action === 'BUY' ? BUY_CAP
 
 function ensureTable(db) {
   db.exec('CREATE TABLE IF NOT EXISTS pi_move(date_ro TEXT NOT NULL, isp INTEGER NOT NULL, at TEXT NOT NULL, action TEXT NOT NULL, mfrr_up REAL, mfrr_dn REAL, afrr_up REAL, afrr_dn REAL, pzu REAL, reasons TEXT, PRIMARY KEY(date_ro, isp, at))');
+  try { db.exec('ALTER TABLE pi_move ADD COLUMN limit_price REAL'); } catch { /* exists */ } // recommended PI price (max buy / min sell) recorded at decision time → settled rows score against it
 }
 
 const r0 = (v) => Math.round(v);
@@ -29,9 +34,9 @@ const r0 = (v) => Math.round(v);
 function decide(mU, mD) {
   const why = [];
   if (mU == null && mD == null) return { action: 'HOLD', reasons: ['no activation data for the ending interval yet'] };
-  if (mU > THR && mU >= mD) { why.push(`mFRR up ${r0(mU)} MW activated in the ending interval (> ${THR} MW) → BUY ${SIZE} MWh on PI for the trade interval (75 min ahead), stay long: settles at the deficit price`); return { action: 'BUY', reasons: why }; }
-  if (mD > THR) { why.push(`mFRR down ${r0(mD)} MW activated in the ending interval (> ${THR} MW) → SELL ${SIZE} MWh on PI for the trade interval (75 min ahead), stay short: settles at the surplus price`); return { action: 'SELL', reasons: why }; }
-  why.push(`mFRR up ${r0(mU || 0)} / down ${r0(mD || 0)} MW in the ending interval — under ${THR} MW, no position`);
+  if (mU > THR_BUY && mU >= mD) { why.push(`mFRR up ${r0(mU)} MW activated in the ending interval (> ${THR_BUY} MW) → BUY ${SIZE} MWh on PI for the trade interval (75 min ahead), stay long: settles at the deficit price`); return { action: 'BUY', reasons: why }; }
+  if (mD > THR_SELL && mD > mU) { why.push(`mFRR down ${r0(mD)} MW activated in the ending interval (> ${THR_SELL} MW) → SELL ${SIZE} MWh on PI for the trade interval (75 min ahead), stay short: settles at the surplus price`); return { action: 'SELL', reasons: why }; }
+  why.push(`mFRR up ${r0(mU || 0)} / down ${r0(mD || 0)} MW in the ending interval — under the triggers (buy > ${THR_BUY} MW up, sell > ${THR_SELL} MW down), no position`);
   return { action: 'HOLD', reasons: why };
 }
 
@@ -75,8 +80,8 @@ async function logDue(db, dayTimestamps) {
   const at = new Date().toISOString().slice(0, 16) + 'Z';
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.prepare('INSERT OR REPLACE INTO pi_move(date_ro, isp, at, action, mfrr_up, mfrr_dn, afrr_up, afrr_dn, pzu, reasons) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(tg.date, tg.isp, at, d.action, lv.mU, lv.mD, lv.aU, lv.aD, pz ? pz.value : null, d.reasons.join(' | '));
+    db.prepare('INSERT OR REPLACE INTO pi_move(date_ro, isp, at, action, mfrr_up, mfrr_dn, afrr_up, afrr_dn, pzu, reasons, limit_price) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(tg.date, tg.isp, at, d.action, lv.mU, lv.mD, lv.aU, lv.aD, pz ? pz.value : null, d.reasons.join(' | '), piLimit(d.action, pz ? pz.value : null));
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   return { target: tg, action: d.action };
@@ -85,7 +90,7 @@ async function logDue(db, dayTimestamps) {
 // Page data for one date: last logged decision per interval + the live window state.
 function pageData(db, date, dayTimestamps) {
   const out = { log: new Map(), window: null, THR, SIZE, WINDOW_MIN };
-  try { for (const r of db.prepare('SELECT isp, at, action, mfrr_up, mfrr_dn, pzu, reasons FROM pi_move WHERE date_ro=? ORDER BY at').all(date)) out.log.set(r.isp, r); } catch { /* table missing */ }
+  try { for (const r of db.prepare('SELECT isp, at, action, mfrr_up, mfrr_dn, pzu, reasons, limit_price FROM pi_move WHERE date_ro=? ORDER BY at').all(date)) { if (r.limit_price == null) r.limit_price = piLimit(r.action, r.pzu); out.log.set(r.isp, r); } } catch { /* table missing */ }
   const ni = roDateIsp(new Date());
   const tg = target(dayTimestamps, ni.date, ni.isp);
   if (tg) out.window = { date: ni.date, isp: ni.isp, minIn: tg.minIn, open: tg.minIn >= WINDOW_MIN, trade: { date: tg.date, isp: tg.isp }, live: live && live.date === ni.date && live.isp === ni.isp ? live : null };
@@ -100,4 +105,12 @@ function pnl(action, price, pzu) {
   return null;
 }
 
-module.exports = { ensureTable, decide, logDue, pageData, pnl, piLimit, THR, SIZE, WINDOW_MIN, BUY_CAP, SELL_FLOOR, TRADE_AHEAD };
+// Settled result vs the RECOMMENDED price (RON/MWh): BUY = settled − max buy price, SELL = min sell price − settled. + = made money
+// even at the worst acceptable PI price; the delta is what to fine-tune the 1.25× / 0.5× factors on.
+function delta(action, price, limit) {
+  if (price == null || limit == null) return null;
+  if (action === 'BUY') return price - limit;
+  if (action === 'SELL') return limit - price;
+  return null;
+}
+module.exports = { delta, ensureTable, decide, logDue, pageData, pnl, piLimit, THR, THR_BUY, THR_SELL, SIZE, WINDOW_MIN, BUY_CAP, SELL_FLOOR, TRADE_AHEAD };
