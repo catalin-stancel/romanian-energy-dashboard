@@ -18,6 +18,78 @@ function ensureTable(db) {
     dev REAL, storage REAL, st_slope REAL, hydro REAL, m_sch REAL, last_price REAL, reasons TEXT,
     PRIMARY KEY (date_ro, isp, target, at)
   ); CREATE INDEX IF NOT EXISTS ix_bat_di ON bat_action(date_ro, isp);`);
+  for (const c of ['exp_price REAL', 'bar REAL']) { try { db.exec('ALTER TABLE bat_action ADD COLUMN ' + c); } catch { /* exists */ } }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// EXPORT ECONOMICS (user 2026-11-02): "getting surplus power at 1,300 and selling at 1,800 in a deficit doesn't work — the
+// power also carries network charges; export must go where aFRR activations make the price". No config: the bar follows the
+// price the column's own CHARGE calls actually paid (last 7 days, settled), the expected price comes from the history of
+// intervals that looked like this one at decision time. Until the VPP state of charge + PI prices are wired in (planned),
+// two assumptions stand in for the contract: ~400 RON/MWh withdrawal network charges and 88% round-trip efficiency.
+const NET_T = 400, ETA = 0.88, MARGIN = 200;
+const mpB = (v) => v == null ? 'na' : v < 1500 ? 'lo' : v < 2000 ? 'mid' : v < 2500 ? 'hi' : 'vhi';
+const stB = (v) => v == null ? 'na' : v < 50 ? 'low' : v < 150 ? 'mid' : 'high';
+const hrB = (isp) => { const h = Math.floor((isp - 1) / 4); return h < 7 ? 'night' : h < 17 ? 'day' : 'eve'; };
+const lpB = (v) => v == null ? 'na' : v < 300 ? 'floor' : v < 600 ? 'lo' : v < 1000 ? 'mid' : 'hi';
+const mgB = (v) => v == null ? 'na' : v < 80 ? 'mild' : v < 150 ? 'mid' : 'big';
+const q = (a, f) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor((s.length - 1) * f)] : null; };
+let _tbl = null, _tblAt = 0;
+// price table: settled intervals of the last 60 days keyed by what was visible at decision time. Rebuilt hourly (one scan).
+function priceTable(db) {
+  if (_tbl && Date.now() - _tblAt < 3600000) return _tbl;
+  const T = { def: new Map(), sur: new Map(), surAll: [] };
+  try {
+    const since = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+    const rows = db.prepare(`SELECT p.date_ro d, p.isp, p.value price, si.value si, mp.value mp1, lp.value lp2, ms.value ms0, st.st
+      FROM series p JOIN series si ON si.series='damas_est_sys_imbalance' AND si.date_ro=p.date_ro AND si.isp=p.isp
+      LEFT JOIN series qu ON qu.series='damas_qup' AND qu.date_ro=p.date_ro AND qu.isp=p.isp
+      LEFT JOIN series qd ON qd.series='damas_qdn' AND qd.date_ro=p.date_ro AND qd.isp=p.isp
+      LEFT JOIN series mp ON mp.series='damas_mp_afrr_up' AND mp.date_ro=p.date_ro AND mp.isp=p.isp-1
+      LEFT JOIN series lp ON lp.series='damas_est_price_pos' AND lp.date_ro=p.date_ro AND lp.isp=p.isp-2
+      LEFT JOIN series ms ON ms.series='damas_mp_mfrr_up_sch' AND ms.date_ro=p.date_ro AND ms.isp=p.isp
+      LEFT JOIN (SELECT date_ro, isp, AVG(storage) st FROM sen_live WHERE date_ro>=? AND storage IS NOT NULL GROUP BY date_ro, isp) st ON st.date_ro=p.date_ro AND st.isp=p.isp
+      WHERE p.series='damas_est_price_pos' AND p.date_ro>=? AND NOT (qu.value=0 AND qd.value=0)`).all(since, since);
+    const add = (m, k, v) => { (m.get(k) || m.set(k, []).get(k)).push(v); };
+    for (const r of rows) {
+      if (r.si < 0) { const k1 = mpB(refPrice(r.ms0, r.mp1, r.lp2)), k2 = stB(r.st), k3 = hrB(r.isp); add(T.def, k1 + '|' + k2 + '|' + k3, r.price); add(T.def, k1 + '|' + k2, r.price); add(T.def, k1, r.price); add(T.def, '*', r.price); }
+      else if (r.si > 0) { const k1 = lpB(r.lp2), k2 = mgB(r.si); add(T.sur, k1 + '|' + k2, r.price); add(T.sur, k2, r.price); add(T.sur, '*', r.price); T.surAll.push(r.price); }
+    }
+  } catch { /* history missing */ }
+  _tbl = T; _tblAt = Date.now(); return T;
+}
+const refPrice = (...v) => { const a = v.filter((x) => x != null && x > 0); return a.length ? Math.max(...a) : null; };
+const pick = (m, keys) => { for (const k of keys) { const a = m.get(k); if (a && a.length >= 12) return { key: k, n: a.length, p25: q(a, 0.25), med: q(a, 0.5), p75: q(a, 0.75) }; } return null; };
+// expected DEFICIT price for this interval given the live evidence; expected SURPLUS price (what a charge would pay)
+function expectDeficit(T, f, forNext) {
+  const sch = forNext ? f.schPriceN : f.schPriceL;
+  const ref = refPrice(sch, f.lastMpAge != null && f.lastMpAge <= 2 ? f.lastMp : null, f.lastPriceAge != null && f.lastPriceAge <= 3 ? f.lastPrice : null);
+  const k1 = mpB(ref), k2 = stB(f.storage), k3 = hrB(f.isp + (forNext ? 1 : 0));
+  const e = pick(T.def, [k1 + '|' + k2 + '|' + k3, k1 + '|' + k2, k1, '*']); if (!e) return null;
+  e.ref = ref; e.sch = sch > 0 ? sch : null;
+  if (e.sch) { const floor = 0.9 * e.sch; e.p25 = Math.max(e.p25, floor); e.med = Math.max(e.med, floor); e.p75 = Math.max(e.p75, floor); } // scheduled mFRR-up marginal = floor
+  return e;
+}
+function expectSurplus(T, f, dev) { const k1 = lpB(f.lastPrice), k2 = mgB(dev == null ? null : Math.abs(dev)); return pick(T.sur, [k1 + '|' + k2, k2, '*']); }
+let _cb = null, _cbAt = 0;
+// charge basis = what the column's own CHARGE calls paid (settled, last 7 days); the export bar grosses it up by the assumed
+// network charges and losses. Falls back to the 60-day median surplus price when the log is thin.
+function costBasis(db, T) {
+  if (_cb && Date.now() - _cbAt < 600000) return _cb;
+  let paid = [];
+  try {
+    const since = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    paid = db.prepare(`SELECT p.value price FROM (SELECT date_ro, isp, MAX(at) at FROM bat_action WHERE target='cur' AND date_ro>=? GROUP BY date_ro, isp) l
+      JOIN bat_action b ON b.date_ro=l.date_ro AND b.isp=l.isp AND b.target='cur' AND b.at=l.at AND b.action='CHARGE'
+      JOIN series p ON p.series='damas_est_price_pos' AND p.date_ro=b.date_ro AND p.isp=b.isp
+      LEFT JOIN series qu ON qu.series='damas_qup' AND qu.date_ro=b.date_ro AND qu.isp=b.isp
+      LEFT JOIN series qd ON qd.series='damas_qdn' AND qd.date_ro=b.date_ro AND qd.isp=b.isp
+      WHERE NOT (qu.value=0 AND qd.value=0)`).all(since).map((r) => r.price);
+  } catch { /* table missing */ }
+  const surMed = q(T.surAll, 0.5) ?? 450;
+  const basis = paid.length >= 5 ? q(paid, 0.5) : surMed;
+  _cb = { basis: Math.round(basis), nPaid: paid.length, bar: Math.round((basis + NET_T) / ETA + MARGIN), chargeBar: Math.round(surMed + 150), surMed: Math.round(surMed) };
+  _cbAt = Date.now(); return _cb;
 }
 
 // Live features for interval `isp` of `date`. sf = latest liveSenFilter() reading (may be null). pub = bal_model pageData().pub
@@ -59,6 +131,16 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
   f.devNowTrue = f.devNow == null ? null : f.devNow - (f.mUpL - f.mDnL);
   if (prices) for (let k = (nowIsp || isp) - 1; k >= Math.max(1, (nowIsp || isp) - 8); k--) { const p = prices.get(k); if (p != null) { f.lastPrice = p; f.lastPriceAge = (nowIsp || isp) - k; break; } }
   if (pub) for (let k = (nowIsp || isp) - 1; k >= Math.max(1, (nowIsp || isp) - 6); k--) { const p = pub.get(k); if (p && p.any) { f.lastAfrr = 4 * (p.aU - p.aD); break; } }
+  f.lastMp = null; f.lastMpAge = null;
+  try { // aFRR-up marginal price of the latest settled interval (marginalPricesOverview lands ~3 min after the interval ends)
+    const r = db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_mp_afrr_up' AND isp<? AND isp>=? AND value>0 ORDER BY isp DESC LIMIT 1").get(date, nowIsp || isp, (nowIsp || isp) - 4);
+    if (r) { f.lastMp = r.value; f.lastMpAge = (nowIsp || isp) - r.isp; }
+  } catch { /* series missing */ }
+  f.schPriceL = f.schPriceN = null;
+  try { // scheduled mFRR-up marginal price (marginalPricesOverview, mFRR_Up_Scheduled) — known at/just before the interval start
+    for (const r of db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_mp_mfrr_up_sch' AND isp IN (?,?) AND value>0").all(date, isp, isp + 1)) { if (r.isp === isp) f.schPriceL = r.value; else f.schPriceN = r.value; }
+  } catch { /* series missing */ }
+  try { const T = priceTable(db); f.expDefL = expectDeficit(T, f, false); f.expDefN = expectDeficit(T, f, true); f.expSur = expectSurplus(T, f, f.devTrue != null ? f.devTrue : f.dev); f.econ = costBasis(db, T); } catch { f.expDefL = f.expDefN = f.expSur = f.econ = null; }
   return f;
 }
 
@@ -122,6 +204,26 @@ function decide(f, forNext) {
   // direction-only guard: never act against the visible sign (that is the one pattern that reads as an intentional imbalance)
   if (action === 'DISCHARGE' && dev > -40) { action = 'HOLD'; strength = null; why.push('→ HOLD: deficit evidence but the live sign is not in deficit'); }
   if (action === 'CHARGE' && dev < 40 && mDn < 300) { action = 'HOLD'; strength = null; why.push('→ HOLD: surplus evidence but the live sign is not in surplus'); }
+  // EXPORT BAR (2026-11-02): a deficit only pays when the aFRR merit order is pushed — the expected price of intervals that looked
+  // like this one (last aFRR-up marginal, battery fleet output, hour) must clear the charge basis grossed up for network + losses.
+  let expPrice = null, bar = null;
+  const ex = forNext ? f.expDefN : f.expDefL;
+  if (action === 'DISCHARGE' && ex && f.econ) {
+    expPrice = ex.med; bar = f.econ.bar;
+    const tag = `expected price ~${r0(ex.med)} RON (p25 ${r0(ex.p25)}, ${ex.n} similar intervals${ex.sch ? ', scheduled mFRR-up marginal ' + r0(ex.sch) + ' = floor' : ex.ref ? ', last marginal/price ' + r0(ex.ref) : ''}) vs export bar ${bar} (charge basis ${f.econ.basis} from ${f.econ.nPaid} charge calls + ~${NET_T} network, η ${ETA})`;
+    if (ex.med < bar) { action = 'HOLD'; strength = null; why.push('→ HOLD: deficit, but ' + tag + ' — re-export would not cover the cost'); }
+    else if (strength === 'strong' && ex.p25 < bar) { strength = 'lean'; why.push('→ lean: ' + tag + ' — a quarter of similar intervals settle under the bar'); }
+    else why.push(tag);
+  }
+  // CHARGE BAR: only buy when this surplus is expected to settle near the floor; a mild surplus at ~800 cannot be re-exported profitably
+  if (action === 'CHARGE' && f.expSur && f.econ) {
+    expPrice = f.expSur.med; bar = f.econ.chargeBar;
+    const tag = `expected surplus price ~${r0(f.expSur.med)} RON (p75 ${r0(f.expSur.p75)}, ${f.expSur.n} similar intervals) vs charge bar ${bar} (60-day surplus median ${f.econ.surMed} + 150)`;
+    if (f.expSur.med > bar) { action = 'HOLD'; strength = null; why.push('→ HOLD: surplus, but ' + tag + ' — too expensive to re-export after network charges'); }
+    else if (strength === 'strong' && f.expSur.p75 > bar) { strength = 'lean'; why.push('→ lean: ' + tag); }
+    else why.push(tag);
+  }
+  return { action, strength, score: s, reasons: why, expPrice, bar };
   // MAGNITUDE cap (review 2026-11-02 of 465 settled calls): when the raw and the pre-activation deviations disagree in sign, the
   // pre-activation read wins 16/21 — but ONLY when it is the larger of the two. In every case where the raw deviation matched or
   // exceeded it, the interval settled within 10 MW of zero or went the raw way (2026-10-30 ISP 69/70: raw +274 vs −126 after 400 MW
@@ -129,7 +231,6 @@ function decide(f, forNext) {
   if (strength === 'strong' && !overshoot && f.dev != null && Math.sign(f.dev) !== Math.sign(dev) && Math.abs(f.dev) >= 40 && Math.abs(f.dev) >= Math.abs(dev)) {
     strength = 'lean'; why.push(`→ lean only: the raw deviation (${f.dev >= 0 ? '+' : ''}${r0(f.dev)} MW) is as large as the pre-activation read — the activation may be overshooting`);
   }
-  return { action, strength, score: s, reasons: why };
 }
 
 // Everything the Predict page needs: decisions for the live interval + the next one, and the last logged action per settled interval.
@@ -151,15 +252,15 @@ function logDue(db, date, nowInfo, liveIsp, sf, stModes, pub, prices) {
   if (nowInfo.date !== date || !(liveIsp > 0)) return;
   const pd = pageData(db, date, nowInfo, liveIsp, sf, stModes, pub, prices);
   const at = new Date().toISOString().slice(0, 16) + 'Z'; // minute resolution → one row per minute per target
-  const ins = db.prepare('INSERT OR REPLACE INTO bat_action(date_ro, isp, target, at, action, strength, score, dev, storage, st_slope, hydro, m_sch, last_price, reasons) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  const ins = db.prepare('INSERT OR REPLACE INTO bat_action(date_ro, isp, target, at, action, strength, score, dev, storage, st_slope, hydro, m_sch, last_price, reasons, exp_price, bar) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const [target, o] of [['cur', pd.cur], ['next', pd.next]]) {
       if (!o) continue; const f = o.f, d = o.d;
-      ins.run(date, o.isp, target, at, d.action, d.strength, d.score, f.dev, f.storage, f.stSlope, f.hydro, target === 'cur' ? f.mUpL - f.mDnL : f.mUpN - f.mDnN, f.lastPrice, d.reasons.join(' | '));
+      ins.run(date, o.isp, target, at, d.action, d.strength, d.score, f.dev, f.storage, f.stSlope, f.hydro, target === 'cur' ? f.mUpL - f.mDnL : f.mUpN - f.mDnN, f.lastPrice, d.reasons.join(' | '), d.expPrice ?? null, d.bar ?? null);
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
-module.exports = { ensureTable, features, decide, pageData, logDue };
+module.exports = { ensureTable, features, decide, pageData, logDue, priceTable, costBasis };
