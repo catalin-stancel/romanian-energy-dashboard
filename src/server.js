@@ -1410,7 +1410,7 @@ async function liveReport(cmd, date) {
   try {
     const res = await fetchT(u, {}, 6000);
     if (!res.ok) why = 'HTTP ' + res.status;
-    else { const all = JSON.parse(res.text).itemList || []; map = new Map(); for (const it of all) { const ri = roDateIsp(new Date(it.timeInterval.from)); if (ri.date === date) map.set(ri.isp, it); } if (!map.size && c && c.map.size) { why = 'empty itemList'; map = null; } }
+    else { const all = JSON.parse(res.text).itemList || []; map = new Map(); const prev = addDays(date, -1); let p0 = null; for (const it of all) { const ri = roDateIsp(new Date(it.timeInterval.from)); if (ri.date === date) map.set(ri.isp, it); else if (ri.date === prev && (!p0 || ri.isp > p0.isp)) p0 = { isp: ri.isp, it }; } if (p0) map.set(0, p0.it); /* key 0 = LAST interval of the previous day: row 1 of the day gets its interval-to-interval change (notif prod/cons/X-B warmth) across midnight (bug 2026-11-02) */ if (!map.size && c && c.map.size) { why = 'empty itemList'; map = null; } }
   } catch (e) { why = (e && e.name === 'AbortError') ? 'timeout 6 s' : (e && e.message || 'error').slice(0, 80); }
   if (!map) {
     console.error(`[damas] ${cmd} ${date}: ${why} → serving last-good${c ? ' (' + Math.round((Date.now() - c.at) / 1000) + ' s old)' : ' (none)'}`);
@@ -2435,6 +2435,8 @@ async function predictPage(date) {
   try { pdSolar = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_solar' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
   let pdWind = new Map(); // D-1 wind forecast per isp (dispatchable-plan derivation)
   try { pdWind = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_wind_onshore' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
+  // key 0 = last interval of the previous day, so row 1's dispatchable-plan step (💧 hydro start/stop marker) carries across midnight (bug 2026-11-02)
+  try { const pv = addDays(date, -1); for (const [m, ser] of [[pdSolar, 'ws_fc_da_solar'], [pdWind, 'ws_fc_da_wind_onshore']]) { const r = db.prepare('SELECT value FROM series WHERE series=? AND date_ro=? AND value IS NOT NULL ORDER BY isp DESC LIMIT 1').get(ser, pv); if (r) m.set(0, r.value); } } catch { /* ignore */ }
   // border capacity utilization: numerator = total commercial exchange (sched_*), denominator = official NTC
   // for BG / rolling 60-day max for HU (flow-based). NTC is hourly → per-isp lookup falls back within the hour.
   const utilM = (() => { const g = (s) => new Map(db.prepare("SELECT isp, value FROM series WHERE series=? AND date_ro=? AND value IS NOT NULL").all(s, date).map((r) => [r.isp, r.value]));
