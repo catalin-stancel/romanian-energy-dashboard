@@ -26,6 +26,30 @@ const THR = THR_SELL; // kept for the page (lowest trigger)
 //         50–57% win, −500 to −1,600: a short in a dear hour is killed by the deficit flips).
 function buyTrigger(pzu) { return pzu == null ? THR_BUY : pzu <= 1400 ? 200 : pzu <= 1800 ? 150 : 400; }
 function sellTrigger(pzu) { return pzu == null ? THR_SELL : pzu <= 600 ? 100 : pzu <= 1400 ? 200 : Infinity; }
+// TREND FILTER (user 2026-11-02: buys fired while the deficit was fading). Publication facts measured on 2026-11-02: the mFRR figure of an
+// interval is its SCHEDULE — it first appears ~5 min before the interval starts and never changes afterwards — so at decision time
+// (minute 10 of t) the schedule of t+1 is visible as well; the estimated system imbalance of an interval lands ~10 min after it ends,
+// so the freshest imbalance at decision time is t−1. Honest replay Sep 1 – Nov 2 at the tier triggers, scored at the limit price:
+//   BUY : deficit at t−1 under 75 MW → 56% win, −35 avg; easing by >20 MW vs t−3 → 56%, −66; schedule of t+1 dropping by >50 MW vs t →
+//         49%, −111; t+1 schedule under 150 MW → 44%, −236. Filter: deficit(t−1) ≥ 50 MW AND not eased > 40 MW since t−3 AND the
+//         t+1 schedule not dropping > 50 MW → keeps 263 of 454 (74%, +225 avg, +14.8k RON on 0.25 MWh), drops 191 (54%, −125, −6.0k).
+//   SELL: the dropped positions still earn (69–73% win), so only the clear losers are cut: imbalance already in deficit at t−1 (45%
+//         win) and a t+1 down schedule dropping > 50 MW (72%, +98 vs +287 flat). Keeps 255 of 307 (83%, +310 avg), drops 52 (69%, +122).
+// Unknown inputs (report not yet published) do not block — the trigger alone decides, and the tooltip says which read was missing.
+const BUY_MIN_DEF = 50, BUY_MAX_EASE = 40, SCHED_DROP = 50;
+function trendBlock(action, mU, mD, ctx) {
+  const c = ctx || {}, why = [];
+  if (action === 'BUY') {
+    if (c.si1 != null) { const def = -c.si1; if (def < BUY_MIN_DEF) why.push(`deficit at t−1 only ${r0(def)} MW (< ${BUY_MIN_DEF}): a buy on a thin deficit is a coin flip`);
+      else if (c.si3 != null && (c.si1 - c.si3) > BUY_MAX_EASE) why.push(`deficit easing: ${r0(-c.si3)} → ${r0(def)} MW over the last 2 intervals (> ${BUY_MAX_EASE} MW): buys into a fading deficit lose`); }
+    if (c.nU != null && mU != null && (mU - c.nU) > SCHED_DROP) why.push(`mFRR up schedule drops ${r0(mU)} → ${r0(c.nU)} MW in the next interval (> ${SCHED_DROP} MW): the operator is unwinding the deficit`);
+  } else if (action === 'SELL') {
+    if (c.si1 != null && c.si1 < 0) why.push(`system already in deficit at t−1 (${r0(c.si1)} MW): no short against the sign`);
+    if (c.nD != null && mD != null && (mD - c.nD) > SCHED_DROP) why.push(`mFRR down schedule drops ${r0(mD)} → ${r0(c.nD)} MW in the next interval (> ${SCHED_DROP} MW): the surplus is being unwound`);
+  }
+  return why;
+}
+const trendRead = (c) => c ? `trend read: imbalance t−1 ${c.si1 == null ? 'n/a' : (c.si1 >= 0 ? '+' : '') + r0(c.si1) + ' MW'}, t−3 ${c.si3 == null ? 'n/a' : (c.si3 >= 0 ? '+' : '') + r0(c.si3) + ' MW'}, next-interval schedule up ${c.nU == null ? 'n/a' : r0(c.nU)} / down ${c.nD == null ? 'n/a' : r0(c.nD)} MW` : 'trend read: n/a';
 const SIZE = 0.25;    // MWh per interval
 const WINDOW_MIN = 10; // decision window opens at minute 10 of the interval (final 5 minutes)
 // PI PRICE LIMITS (user 2026-11-02, applied by hand until PI prices are integrated): BUY only if PI ≤ 1.25× PZU — the deficit price in
@@ -36,18 +60,26 @@ const piLimit = (action, pzu) => pzu == null ? null : action === 'BUY' ? BUY_CAP
 
 function ensureTable(db) {
   db.exec('CREATE TABLE IF NOT EXISTS pi_move(date_ro TEXT NOT NULL, isp INTEGER NOT NULL, at TEXT NOT NULL, action TEXT NOT NULL, mfrr_up REAL, mfrr_dn REAL, afrr_up REAL, afrr_dn REAL, pzu REAL, reasons TEXT, PRIMARY KEY(date_ro, isp, at))');
-  try { db.exec('ALTER TABLE pi_move ADD COLUMN limit_price REAL'); } catch { /* exists */ } // recommended PI price (max buy / min sell) recorded at decision time → settled rows score against it
+  try { db.exec('ALTER TABLE pi_move ADD COLUMN limit_price REAL'); } catch { /* exists */ }
+  for (const c of ['imb_prev', 'imb_prev3', 'next_up', 'next_dn']) { try { db.exec(`ALTER TABLE pi_move ADD COLUMN ${c} REAL`); } catch { /* exists */ } } // trend inputs at decision time // recommended PI price (max buy / min sell) recorded at decision time → settled rows score against it
 }
 
 const r0 = (v) => Math.round(v);
 // Decision from the mFRR activation (MW) of the interval that is ending.
-function decide(mU, mD, pzu) {
+function decide(mU, mD, pzu, ctx) {
   const why = [];
   if (mU == null && mD == null) return { action: 'HOLD', reasons: ['no activation data for the ending interval yet'] };
   const tb = buyTrigger(pzu), ts = sellTrigger(pzu);
   const tier = pzu == null ? 'PZU of the trade interval unknown — flat triggers' : `PZU ${r0(pzu)} → buy trigger ${tb} MW, sell trigger ${ts === Infinity ? 'none (no shorts above 1,400 PZU)' : ts + ' MW'}`;
-  if (mU > tb && mU >= mD) { why.push(`mFRR up ${r0(mU)} MW activated in the ending interval (> ${tb} MW) → BUY on PI for the trade interval (75 min ahead), stay long: settles at the deficit price · ${tier}${pzu != null && pzu <= 1400 ? ' · cheap tier: needs battery room to charge a wrong buy (honour), riding a wrong buy at this price loses' : ''}`); return { action: 'BUY', reasons: why }; }
-  if (mD > ts && mD > mU) { why.push(`mFRR down ${r0(mD)} MW activated in the ending interval (> ${ts} MW) → SELL on PI for the trade interval (75 min ahead), stay short: settles at the surplus price · ${tier}`); return { action: 'SELL', reasons: why }; }
+  const tr = trendRead(ctx);
+  if (mU > tb && mU >= mD) {
+    const blk = trendBlock('BUY', mU, mD, ctx);
+    if (blk.length) { why.push(`mFRR up ${r0(mU)} MW in the ending interval (> ${tb} MW) would BUY, but the TREND FILTER blocks it: ${blk.join('; ')} · ${tr} · ${tier}`); return { action: 'HOLD', reasons: why, blocked: 'BUY' }; }
+    why.push(`mFRR up ${r0(mU)} MW activated in the ending interval (> ${tb} MW) → BUY on PI for the trade interval (75 min ahead), stay long: settles at the deficit price · ${tr} (deficit holding) · ${tier}${pzu != null && pzu <= 1400 ? ' · cheap tier: needs battery room to charge a wrong buy (honour), riding a wrong buy at this price loses' : ''}`); return { action: 'BUY', reasons: why }; }
+  if (mD > ts && mD > mU) {
+    const blk = trendBlock('SELL', mU, mD, ctx);
+    if (blk.length) { why.push(`mFRR down ${r0(mD)} MW in the ending interval (> ${ts} MW) would SELL, but the TREND FILTER blocks it: ${blk.join('; ')} · ${tr} · ${tier}`); return { action: 'HOLD', reasons: why, blocked: 'SELL' }; }
+    why.push(`mFRR down ${r0(mD)} MW activated in the ending interval (> ${ts} MW) → SELL on PI for the trade interval (75 min ahead), stay short: settles at the surplus price · ${tr} (surplus holding) · ${tier}`); return { action: 'SELL', reasons: why }; }
   why.push(`mFRR up ${r0(mU || 0)} / down ${r0(mD || 0)} MW in the ending interval — under the triggers · ${tier}`);
   return { action: 'HOLD', reasons: why };
 }
@@ -55,16 +87,29 @@ function decide(mU, mD, pzu) {
 // memo of the latest direct fetch: { date, isp, mU, mD, aU, aD, at }
 let live = null;
 async function fetchLive(date, isp, tsIso) {
-  const from = new Date(tsIso), to = new Date(from.getTime() + 900000);
+  const from = new Date(tsIso), to = new Date(from.getTime() + 2 * 900000); // t and t+1 (its schedule is published ~5 min before it starts)
   const url = new URL(BASE + 'activatedBalancingEnergyOverview');
   url.searchParams.set('timeInterval', JSON.stringify({ from: from.toISOString(), to: to.toISOString() }));
   const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
   if (!r.ok) throw new Error(`DAMAS activatedBalancingEnergyOverview ${r.status}`);
   const items = (await r.json()).itemList || [];
-  const it = items.find((x) => x.timeInterval && x.timeInterval.from && new Date(x.timeInterval.from).getTime() === from.getTime()) || items[0];
+  const at = (ms) => items.find((x) => x.timeInterval && x.timeInterval.from && new Date(x.timeInterval.from).getTime() === ms) || null;
+  const it = at(from.getTime()) || items[0], nx = at(from.getTime() + 900000);
   const num = (v) => { const n = Number(v); return v !== null && v !== undefined && Number.isFinite(n) ? n : null; };
+  const x4 = (v) => v == null ? null : 4 * v;
   const mU = it ? num(it.mFRR_Up) : null, mD = it ? num(it.mFRR_Down) : null, aU = it ? num(it.aFRR_Up) : null, aD = it ? num(it.aFRR_Down) : null;
-  live = { date, isp, mU: mU == null ? null : 4 * mU, mD: mD == null ? null : 4 * mD, aU: aU == null ? null : 4 * aU, aD: aD == null ? null : 4 * aD, at: Date.now() };
+  const nU = nx ? num(nx.mFRR_Up) : null, nD = nx ? num(nx.mFRR_Down) : null;
+  // estimated system imbalance of t−3..t−1 (the t−1 figure lands ~10 min after t−1 ends, i.e. right at the window opening)
+  let si1 = null, si3 = null;
+  try {
+    const u2 = new URL(BASE + 'estimatedPowerSystemImbalance');
+    u2.searchParams.set('timeInterval', JSON.stringify({ from: new Date(from.getTime() - 3 * 900000).toISOString(), to: from.toISOString() }));
+    const r2 = await fetch(u2, { signal: AbortSignal.timeout(20000) });
+    if (r2.ok) { const its = (await r2.json()).itemList || [];
+      const g = (ms) => { const x = its.find((y) => y.timeInterval && y.timeInterval.from && new Date(y.timeInterval.from).getTime() === ms); return x ? num(x.estimatedSystemImbalance) : null; };
+      si1 = g(from.getTime() - 900000); si3 = g(from.getTime() - 3 * 900000); }
+  } catch { /* keep nulls: the trigger alone decides */ }
+  live = { date, isp, mU: x4(mU), mD: x4(mD), aU: x4(aU), aD: x4(aD), nU: x4(nU), nD: x4(nD), si1, si3, at: Date.now() };
   return live;
 }
 
@@ -88,12 +133,15 @@ async function logDue(db, dayTimestamps) {
   const row = dayTimestamps(ni.date)[ni.isp - 1];
   const lv = await fetchLive(ni.date, ni.isp, row.ts);
   const pz = db.prepare("SELECT value FROM series WHERE date_ro=? AND isp=? AND series='pzu_ron'").get(tg.date, tg.isp);
-  const d = decide(lv.mU, lv.mD, pz ? pz.value : null);
+  // trend inputs: direct fetch first, the stored series as fallback (the puller may already hold t−1 / t−3)
+  const si = (k) => { const rr = dayTimestamps(ni.date)[ni.isp - 1 - k]; if (!rr) return null; const x = db.prepare("SELECT value FROM series WHERE ts_utc=? AND series='damas_est_sys_imbalance'").get(new Date(rr.ts).toISOString()); return x ? x.value : null; };
+  const ctx = { si1: lv.si1 != null ? lv.si1 : si(1), si3: lv.si3 != null ? lv.si3 : si(3), nU: lv.nU, nD: lv.nD };
+  const d = decide(lv.mU, lv.mD, pz ? pz.value : null, ctx);
   const at = new Date().toISOString().slice(0, 16) + 'Z';
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.prepare('INSERT OR REPLACE INTO pi_move(date_ro, isp, at, action, mfrr_up, mfrr_dn, afrr_up, afrr_dn, pzu, reasons, limit_price) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-      .run(tg.date, tg.isp, at, d.action, lv.mU, lv.mD, lv.aU, lv.aD, pz ? pz.value : null, d.reasons.join(' | '), piLimit(d.action, pz ? pz.value : null));
+    db.prepare('INSERT OR REPLACE INTO pi_move(date_ro, isp, at, action, mfrr_up, mfrr_dn, afrr_up, afrr_dn, pzu, reasons, limit_price, imb_prev, imb_prev3, next_up, next_dn) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(tg.date, tg.isp, at, d.action, lv.mU, lv.mD, lv.aU, lv.aD, pz ? pz.value : null, d.reasons.join(' | '), piLimit(d.action, pz ? pz.value : null), ctx.si1, ctx.si3, ctx.nU, ctx.nD);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   return { target: tg, action: d.action };
@@ -125,4 +173,4 @@ function delta(action, price, limit) {
   if (action === 'SELL') return limit - price;
   return null;
 }
-module.exports = { delta, ensureTable, decide, logDue, pageData, pnl, piLimit, buyTrigger, sellTrigger, THR, THR_BUY, THR_SELL, SIZE, WINDOW_MIN, BUY_CAP, SELL_FLOOR, TRADE_AHEAD };
+module.exports = { delta, ensureTable, decide, logDue, pageData, pnl, piLimit, buyTrigger, sellTrigger, trendBlock, THR, THR_BUY, THR_SELL, SIZE, WINDOW_MIN, BUY_CAP, SELL_FLOOR, TRADE_AHEAD };
