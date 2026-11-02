@@ -14,8 +14,18 @@ const BASE = 'https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/001
 // Triggers (MW of mFRR activation in the ending interval; DAMAS publishes MWh per 15 min → ×4). Sweep 2026-11-02 at the trade-row lag,
 // scored at the limit price: BUY edge starts at 300 MW (THR 300: 206 calls, 70% win, +139 RON/MWh avg; <200 MW ≈ coin flip at
 // 1.25× PZU); SELL best at 200 MW (251 calls, 78%, +48 avg; the 400–600 MW down band loses: big down activations get reversed).
-const THR_BUY = 300, THR_SELL = 200;
+const THR_BUY = 300, THR_SELL = 200; // flat fallbacks when the PZU of the trade interval is unknown
 const THR = THR_SELL; // kept for the page (lowest trigger)
+// PRICE TIERS (user 2026-11-02: "if the price is lower, a lower mFRR is required" — a cheap wrong buy is charged and resold later, so it
+// costs little; a dear one is not). Trigger by the PZU of the TRADE interval, from the Sep–Nov sweep at the trade-row lag scored at the
+// limit price (buy 1.25× / sell 0.5× PZU), with the backstop for buys (charge a wrong buy, resell at 0.88 × next-12h deficit median − 400):
+//   BUY : PZU ≤ 1,400 → 200 MW (79% / +261 under 1,000, 69% / +229 at 1,000–1,400 — ONLY with battery room to absorb a wrong buy:
+//         riding it loses −181 under 1,000); 1,400–1,800 → 150 MW (69% / +357, deficit prices run far above 1.25× PZU in those hours);
+//         > 1,800 → 400 MW (buys lose 55–73% of the time at every lower trigger: the deficit price does not scale above 1.25× a 2,000 PZU).
+//   SELL: PZU ≤ 600 → 100 MW (82% / +311); 600–1,400 → 200 MW (78% / +309, 79% / +125); > 1,400 → never (loses at every trigger,
+//         50–57% win, −500 to −1,600: a short in a dear hour is killed by the deficit flips).
+function buyTrigger(pzu) { return pzu == null ? THR_BUY : pzu <= 1400 ? 200 : pzu <= 1800 ? 150 : 400; }
+function sellTrigger(pzu) { return pzu == null ? THR_SELL : pzu <= 600 ? 100 : pzu <= 1400 ? 200 : Infinity; }
 const SIZE = 0.25;    // MWh per interval
 const WINDOW_MIN = 10; // decision window opens at minute 10 of the interval (final 5 minutes)
 // PI PRICE LIMITS (user 2026-11-02, applied by hand until PI prices are integrated): BUY only if PI ≤ 1.25× PZU — the deficit price in
@@ -31,12 +41,14 @@ function ensureTable(db) {
 
 const r0 = (v) => Math.round(v);
 // Decision from the mFRR activation (MW) of the interval that is ending.
-function decide(mU, mD) {
+function decide(mU, mD, pzu) {
   const why = [];
   if (mU == null && mD == null) return { action: 'HOLD', reasons: ['no activation data for the ending interval yet'] };
-  if (mU > THR_BUY && mU >= mD) { why.push(`mFRR up ${r0(mU)} MW activated in the ending interval (> ${THR_BUY} MW) → BUY ${SIZE} MWh on PI for the trade interval (75 min ahead), stay long: settles at the deficit price`); return { action: 'BUY', reasons: why }; }
-  if (mD > THR_SELL && mD > mU) { why.push(`mFRR down ${r0(mD)} MW activated in the ending interval (> ${THR_SELL} MW) → SELL ${SIZE} MWh on PI for the trade interval (75 min ahead), stay short: settles at the surplus price`); return { action: 'SELL', reasons: why }; }
-  why.push(`mFRR up ${r0(mU || 0)} / down ${r0(mD || 0)} MW in the ending interval — under the triggers (buy > ${THR_BUY} MW up, sell > ${THR_SELL} MW down), no position`);
+  const tb = buyTrigger(pzu), ts = sellTrigger(pzu);
+  const tier = pzu == null ? 'PZU of the trade interval unknown — flat triggers' : `PZU ${r0(pzu)} → buy trigger ${tb} MW, sell trigger ${ts === Infinity ? 'none (no shorts above 1,400 PZU)' : ts + ' MW'}`;
+  if (mU > tb && mU >= mD) { why.push(`mFRR up ${r0(mU)} MW activated in the ending interval (> ${tb} MW) → BUY on PI for the trade interval (75 min ahead), stay long: settles at the deficit price · ${tier}${pzu != null && pzu <= 1400 ? ' · cheap tier: needs battery room to charge a wrong buy (honour), riding a wrong buy at this price loses' : ''}`); return { action: 'BUY', reasons: why }; }
+  if (mD > ts && mD > mU) { why.push(`mFRR down ${r0(mD)} MW activated in the ending interval (> ${ts} MW) → SELL on PI for the trade interval (75 min ahead), stay short: settles at the surplus price · ${tier}`); return { action: 'SELL', reasons: why }; }
+  why.push(`mFRR up ${r0(mU || 0)} / down ${r0(mD || 0)} MW in the ending interval — under the triggers · ${tier}`);
   return { action: 'HOLD', reasons: why };
 }
 
@@ -75,8 +87,8 @@ async function logDue(db, dayTimestamps) {
   const tg = target(dayTimestamps, ni.date, ni.isp); if (!tg || tg.minIn < WINDOW_MIN) return null;
   const row = dayTimestamps(ni.date)[ni.isp - 1];
   const lv = await fetchLive(ni.date, ni.isp, row.ts);
-  const d = decide(lv.mU, lv.mD);
   const pz = db.prepare("SELECT value FROM series WHERE date_ro=? AND isp=? AND series='pzu_ron'").get(tg.date, tg.isp);
+  const d = decide(lv.mU, lv.mD, pz ? pz.value : null);
   const at = new Date().toISOString().slice(0, 16) + 'Z';
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -113,4 +125,4 @@ function delta(action, price, limit) {
   if (action === 'SELL') return limit - price;
   return null;
 }
-module.exports = { delta, ensureTable, decide, logDue, pageData, pnl, piLimit, THR, THR_BUY, THR_SELL, SIZE, WINDOW_MIN, BUY_CAP, SELL_FLOOR, TRADE_AHEAD };
+module.exports = { delta, ensureTable, decide, logDue, pageData, pnl, piLimit, buyTrigger, sellTrigger, THR, THR_BUY, THR_SELL, SIZE, WINDOW_MIN, BUY_CAP, SELL_FLOOR, TRADE_AHEAD };
