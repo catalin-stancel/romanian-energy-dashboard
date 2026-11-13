@@ -140,6 +140,11 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
   try { // scheduled mFRR-up marginal price (marginalPricesOverview, mFRR_Up_Scheduled) — known at/just before the interval start
     for (const r of db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_mp_mfrr_up_sch' AND isp IN (?,?) AND value>0").all(date, isp, isp + 1)) { if (r.isp === isp) f.schPriceL = r.value; else f.schPriceN = r.value; }
   } catch { /* series missing */ }
+  f.schPriceDnL = f.schPriceDnN = null;
+  try { // scheduled mFRR-DOWN marginal price (mFRR_Down_Scheduled): what a charge under mFRR down pays. Sep 1 – Nov 12 2026: in 1,032
+    // surplus intervals with down scheduled the settled price sat within ±50 RON of it 82% of the time (median +3, p10 −74, p90 +41).
+    for (const r of db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_mp_mfrr_down_sch' AND isp IN (?,?)").all(date, isp, isp + 1)) { if (r.isp === isp) f.schPriceDnL = r.value; else f.schPriceDnN = r.value; }
+  } catch { /* series missing */ }
   try { const T = priceTable(db); f.expDefL = expectDeficit(T, f, false); f.expDefN = expectDeficit(T, f, true); f.expSur = expectSurplus(T, f, f.devTrue != null ? f.devTrue : f.dev); f.econ = costBasis(db, T); } catch { f.expDefL = f.expDefN = f.expSur = f.econ = null; }
   return f;
 }
@@ -204,6 +209,27 @@ function decide(f, forNext) {
   // direction-only guard: never act against the visible sign (that is the one pattern that reads as an intentional imbalance)
   if (action === 'DISCHARGE' && dev > -40) { action = 'HOLD'; strength = null; why.push('→ HOLD: deficit evidence but the live sign is not in deficit'); }
   if (action === 'CHARGE' && dev < 40 && mDn < 300) { action = 'HOLD'; strength = null; why.push('→ HOLD: surplus evidence but the live sign is not in surplus'); }
+  // CHARGE ONLY UNDER mFRR DOWN (user 2026-11-12): a charge is called only while Transelectrica has mFRR down scheduled for the
+  // interval — then the surplus is the operator's own read and the price is the scheduled down marginal, known in advance. Sep 1 –
+  // Nov 12 2026: 1,176 intervals under scheduled mFRR down settled in surplus 88% of the time, median price 254 RON, 87% below PZU.
+  // An overshoot (down activation running against a live deficit) has already zeroed mDn above, so it never charges.
+  // LOW-PRICE REGIME (2026-11-13): the one surplus worth charging WITHOUT mFRR down is the aFRR-down regime already running —
+  // no mFRR scheduled either way, raw surplus ≥ 40 MW, last published price < 300 RON (≤ 3 intervals old) and the battery fleet
+  // idle (< 20 MW). 15 Oct – 13 Nov 2026: 27 intervals, 4% settled ≥ 1,000, 19% negative, mean 196 RON — against 470 plain
+  // no-mFRR surpluses at 30% ≥ 1,000, mean 803. (2026-11-13 06:00–06:45: −272 / 133 / 294 RON, refused by the gate alone.)
+  // Thin sample: review after two weeks of logging.
+  const lowRegime = !(mDn > 0) && !(mUp > 0) && f.dev != null && f.dev >= 40 && f.lastPrice != null && f.lastPriceAge != null && f.lastPriceAge <= 3 && f.lastPrice < 300 && f.storage != null && f.storage < 20;
+  if (lowRegime && action === 'HOLD' && s <= 0) { action = 'CHARGE'; strength = 'lean'; }
+  if (lowRegime && action === 'CHARGE') why.push(`LOW-PRICE REGIME: no mFRR scheduled, raw surplus +${r0(f.dev)} MW, last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago, < 300), batteries idle (${r0(f.storage)} MW) — charge without mFRR down (27 similar intervals: 4% ≥ 1,000, mean 196 RON)`);
+  if (action === 'CHARGE' && !(mDn > 0) && !lowRegime) { action = 'HOLD'; strength = null; why.push(`→ HOLD: surplus evidence but no mFRR down scheduled ${forNext ? 'for the next interval' : 'this interval'} and not the low-price regime (needs last price < 300, batteries < 20 MW, raw surplus ≥ 40 MW) — charge only under mFRR down`); }
+  // OVERSHOOT GUARD (2026-11-13): under mFRR down the 1,000+ charges are the intervals where the raw sold−plan deviation is already
+  // negative — the down activation is overshooting and aFRR up sets the price. 15 Oct – 13 Nov 2026, charges under the gate by raw
+  // deviation in the first 5 minutes: < −80 MW → 60% ≥ 1,000 (mean 1,336); −80…−40 → 33% (892); −40…0 → 10% (474); ≥ 0 → 1% (325).
+  // Rule: charge only if raw ≥ 0, or raw ≥ −40 with the batteries idle (< 20 MW). Cuts ≥ 1,000 from 7% to 2%, mean 420 → 336.
+  if (action === 'CHARGE' && mDn > 0 && f.dev != null && !(f.dev >= 0 || (f.dev >= -40 && f.storage != null && f.storage < 20))) {
+    action = 'HOLD'; strength = null;
+    why.push(`→ HOLD: OVERSHOOT GUARD — mFRR down ${r0(mDn)} MW scheduled but the raw deviation is ${r0(f.dev)} MW${f.storage != null ? ' with batteries at ' + r0(f.storage) + ' MW' : ''}: charges like this settle ≥ 1,000 RON in a third to a half of cases (needs raw ≥ 0, or ≥ −40 with batteries < 20 MW)`);
+  }
   // EXPORT BAR (2026-11-02): a deficit only pays when the aFRR merit order is pushed — the expected price of intervals that looked
   // like this one (last aFRR-up marginal, battery fleet output, hour) must clear the charge basis grossed up for network + losses.
   let expPrice = null, bar = null;
@@ -216,6 +242,13 @@ function decide(f, forNext) {
     else why.push(tag);
   }
   // CHARGE BAR: only buy when this surplus is expected to settle near the floor; a mild surplus at ~800 cannot be re-exported profitably
+  const sd = forNext ? f.schPriceDnN : f.schPriceDnL;
+  if (action === 'CHARGE' && sd != null && f.econ) {
+    expPrice = sd; bar = f.econ.chargeBar;
+    const tag = `charge price = scheduled mFRR-down marginal ${r0(sd)} RON (the settled price lands within ±50 RON of it in 82% of surplus intervals) vs charge bar ${bar} (60-day surplus median ${f.econ.surMed} + 150)`;
+    if (sd > bar) { action = 'HOLD'; strength = null; why.push('→ HOLD: under mFRR down, but ' + tag + ' — too expensive to re-export after network charges'); }
+    else why.push(tag);
+  } else
   if (action === 'CHARGE' && f.expSur && f.econ) {
     expPrice = f.expSur.med; bar = f.econ.chargeBar;
     const tag = `expected surplus price ~${r0(f.expSur.med)} RON (p75 ${r0(f.expSur.p75)}, ${f.expSur.n} similar intervals) vs charge bar ${bar} (60-day surplus median ${f.econ.surMed} + 150)`;
@@ -223,7 +256,7 @@ function decide(f, forNext) {
     else if (strength === 'strong' && f.expSur.p75 > bar) { strength = 'lean'; why.push('→ lean: ' + tag); }
     else why.push(tag);
   }
-  return { action, strength, score: s, reasons: why, expPrice, bar };
+  return { action, strength, score: s, reasons: why, expPrice, bar, dev, mDn, overshoot };
   // MAGNITUDE cap (review 2026-11-02 of 465 settled calls): when the raw and the pre-activation deviations disagree in sign, the
   // pre-activation read wins 16/21 — but ONLY when it is the larger of the two. In every case where the raw deviation matched or
   // exceeded it, the interval settled within 10 MW of zero or went the raw way (2026-10-30 ISP 69/70: raw +274 vs −126 after 400 MW
@@ -249,7 +282,7 @@ function pageData(db, date, nowInfo, liveIsp, sf, stModes, pub, prices) {
 
 // 60-s logger (NOT from a request handler): record the live decision for the current + next interval.
 function logDue(db, date, nowInfo, liveIsp, sf, stModes, pub, prices) {
-  if (nowInfo.date !== date || !(liveIsp > 0)) return;
+  if (nowInfo.date !== date || !(liveIsp > 0)) return null;
   const pd = pageData(db, date, nowInfo, liveIsp, sf, stModes, pub, prices);
   const at = new Date().toISOString().slice(0, 16) + 'Z'; // minute resolution → one row per minute per target
   const ins = db.prepare('INSERT OR REPLACE INTO bat_action(date_ro, isp, target, at, action, strength, score, dev, storage, st_slope, hydro, m_sch, last_price, reasons, exp_price, bar) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
@@ -261,6 +294,7 @@ function logDue(db, date, nowInfo, liveIsp, sf, stModes, pub, prices) {
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return pd;
 }
 
-module.exports = { ensureTable, features, decide, pageData, logDue, priceTable, costBasis };
+module.exports = { ensureTable, features, decide, pageData, logDue, priceTable, costBasis, NET_T, ETA, MARGIN };
