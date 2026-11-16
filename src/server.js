@@ -376,7 +376,7 @@ function pzuData(date) {
   return { date, locked, unlocked: isUnlocked(date), lockAt, predRun, maxMwh: cfg.max_mwh_per_isp, rows };
 }
 
-const NAV = (active, date, refreshSec, extras) => `
+const NAV = (active, date, refreshSec, extras) => `${tripAlarm.clientHtml}
 <div class="banner">
   <h1><span class="highlight">GAN Trading</span></h1>
   ${extras || ''}
@@ -1480,6 +1480,16 @@ const batteryAction = require('./battery_action');
 try { batteryAction.ensureTable(db); } catch (e) { console.error('bat table:', e.message); }
 const piMove = require('./pi_move');
 const batSale = require('./bat_sale');
+// unit-trip alarm (2026-11-16): sudden loss of nuclear / coal / gas output on the live feed → banner + sound on every page
+const tripAlarm = require('./trip_alarm');
+try { tripAlarm.ensureTable(db); tripAlarm.load(db); } catch (e) { console.error('trip_alarm table:', e.message); }
+// outage-file watcher (2026-11-16): Transelectrica 7productie5.xls (units > 100 MW withdrawn / tripped) → alarm on new entries
+const outageWatch = require('./outage_watch');
+try { outageWatch.ensureTable(db); } catch (e) { console.error('outage_entry table:', e.message); }
+let _outageErrAt = 0;
+const outageTick = () => outageWatch.poll(db).then((r) => { if (r && r.changed) console.log(`outage file: version ${r.modified}, ${r.entries} entries, ${r.added} new, ${r.updated} changed, ${r.alarms} alarm(s)${r.seeded ? '' : ' (first run: recorded only)'}`); })
+  .catch((e) => { if (Date.now() - _outageErrAt > 3600000) { _outageErrAt = Date.now(); console.error('outage file:', e.message); } });
+setTimeout(() => { outageTick(); setInterval(outageTick, outageWatch.POLL_MS); }, 45000);
 try { batSale.ensureTable(db); } catch (e) { console.error('bat_sale table:', e.message); }
 try { piMove.ensureTable(db); } catch (e) { console.error('pi_move table:', e.message); }
 // live sign predictor (P(surplus) per upcoming interval). Model trained on settled history, cached + retrained hourly.
@@ -2045,6 +2055,11 @@ every60(35000, () => liveSenFilter().catch(() => null).then((sf) => timed('bat l
   const sr = batSale.logDue(db, dayTimestamps, ni.date, pd);
   if (sr && sr.placed) console.log(`bat sale: SELL ${sr.placed.size} MWh for ${sr.placed.date} isp ${sr.placed.isp} (stock ${sr.placed.stock})`);
 })));
+// unit-trip alarm: every 20 s read the live feed (cached ≤ 10 s) and look for a step loss of dispatchable generation
+setInterval(() => liveSenFilter().catch(() => null).then((sf) => {
+  try { const r = tripAlarm.feed(db, sf, roDateIsp, senFilter.naiveMs); for (const a of r.raised) console.log(`TRIP ALARM: ${a.level} ${a.source} ${Math.round(a.from_mw)} → ${Math.round(a.to_mw)} MW (${Math.round(a.drop_mw)} MW in ${a.window_s} s) — ${a.hint}`); }
+  catch (e) { console.error('trip alarm:', e.message); }
+}), 20000);
 // PI move (2026-11-02): in the final 5 minutes of the interval the mFRR activation is visible → log the 0.25 MWh position for the next interval
 every60(29000, () => piMove.logDue(db, dayTimestamps).then((r) => { if (r) console.log(`pi move: ${r.target.date} isp ${r.target.isp} ${r.action}`); }).catch((e) => console.error('pi move:', e.message)));
 // background warmer: refresh the 10-min curve models + 60-s anomaly-gap memos off the request path so a Predict render never
@@ -3246,6 +3261,7 @@ const server = http.createServer(async (req, res) => {
       const fwd = []; for (const [isp, mw] of P.fc) { const w = P.wsF(tsOf.get(isp)); fwd.push({ isp, mw: Math.round(mw), ws: w == null ? null : +w.toFixed(1) }); }
       return json({ date: qd, liveIsp: ni.date === qd ? ni.isp : null, comp: P.comp, stations: P.stations, mw: P.fleet.liveMw, trend10: P.fleet.trend10, onset: P.onset, lastIsp: P.lastIsp, fwd });
     }
+    if (url.pathname === '/api/trip_alarm') return json({ ...tripAlarm.state(), outage: outageWatch.status(db) }); // active + recent alarms, outage-file state (read only)
     if (url.pathname === '/api/pulse') {
       // LIVE system-state nowcast from the freshest SCADA (sen_live table → no extra source load): dev = sold − plan
       // (physical exchange vs plan) reads the settled imbalance at ~0.54 / 80% sign — import OVER plan → DEFICIT lean.
