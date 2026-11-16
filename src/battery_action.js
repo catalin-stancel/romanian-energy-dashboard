@@ -218,10 +218,20 @@ function decide(f, forNext) {
   // idle (< 20 MW). 15 Oct – 13 Nov 2026: 27 intervals, 4% settled ≥ 1,000, 19% negative, mean 196 RON — against 470 plain
   // no-mFRR surpluses at 30% ≥ 1,000, mean 803. (2026-11-13 06:00–06:45: −272 / 133 / 294 RON, refused by the gate alone.)
   // Thin sample: review after two weeks of logging.
-  const lowRegime = !(mDn > 0) && !(mUp > 0) && f.dev != null && f.dev >= 40 && f.lastPrice != null && f.lastPriceAge != null && f.lastPriceAge <= 3 && f.lastPrice < 300 && f.storage != null && f.storage < 20;
+  const noMfrrSurplus = !(mDn > 0) && !(mUp > 0) && f.dev != null && f.dev >= 40 && f.lastPrice != null && f.lastPriceAge != null && f.lastPriceAge <= 3;
+  const floorRegime = noMfrrSurplus && f.lastPrice < 300 && f.storage != null && f.storage < 20;
+  // aFRR-DOWN REGIME (2026-11-16): the night of 15–16 Nov had no mFRR down at all, the surplus was absorbed by aFRR down and settled
+  // at 370–565 RON against a PZU near 1,050 — refused by the gate, taken by the old algorithm. The class "no mFRR, raw surplus ≥ 40 MW,
+  // last price 300–565" is mixed (15 Oct – 16 Nov: 66 intervals, 30% ≥ 1,000, mean 677); what splits it is the last published aFRR:
+  // net UP two intervals back → 79% ≥ 1,000 (mean 1,107, 14 intervals); net DOWN by ≥ 20 MW → 10% ≥ 1,000, mean 451, PZU − price 981
+  // (40 intervals). So: last price under the charge bar AND last published aFRR net down ≥ 20 MW. Provisional (40 intervals).
+  const cbar = f.econ && f.econ.chargeBar != null ? f.econ.chargeBar : 565;
+  const afrrDownRegime = noMfrrSurplus && !floorRegime && f.lastPrice < cbar && f.lastAfrr != null && f.lastAfrr <= -20;
+  const lowRegime = floorRegime || afrrDownRegime;
   if (lowRegime && action === 'HOLD' && s <= 0) { action = 'CHARGE'; strength = 'lean'; }
-  if (lowRegime && action === 'CHARGE') why.push(`LOW-PRICE REGIME: no mFRR scheduled, raw surplus +${r0(f.dev)} MW, last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago, < 300), batteries idle (${r0(f.storage)} MW) — charge without mFRR down (27 similar intervals: 4% ≥ 1,000, mean 196 RON)`);
-  if (action === 'CHARGE' && !(mDn > 0) && !lowRegime) { action = 'HOLD'; strength = null; why.push(`→ HOLD: surplus evidence but no mFRR down scheduled ${forNext ? 'for the next interval' : 'this interval'} and not the low-price regime (needs last price < 300, batteries < 20 MW, raw surplus ≥ 40 MW) — charge only under mFRR down`); }
+  if (afrrDownRegime && action === 'CHARGE') why.push(`aFRR-DOWN REGIME: no mFRR scheduled, raw surplus +${r0(f.dev)} MW, last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago, under the charge bar ${r0(cbar)}), last published aFRR net down ${r0(-f.lastAfrr)} MW — charge without mFRR down (40 similar intervals: 10% ≥ 1,000, mean 451 RON)`);
+  if (floorRegime && action === 'CHARGE') why.push(`LOW-PRICE REGIME: no mFRR scheduled, raw surplus +${r0(f.dev)} MW, last published price ${r0(f.lastPrice)} RON (${f.lastPriceAge} ISP ago, < 300), batteries idle (${r0(f.storage)} MW) — charge without mFRR down (27 similar intervals: 4% ≥ 1,000, mean 196 RON)`);
+  if (action === 'CHARGE' && !(mDn > 0) && !lowRegime) { action = 'HOLD'; strength = null; why.push(`→ HOLD: surplus evidence but no mFRR down scheduled ${forNext ? 'for the next interval' : 'this interval'} and neither exception applies (floor regime: last price < 300 with batteries < 20 MW; aFRR-down regime: last price under the charge bar with the last published aFRR net down ≥ 20 MW; both need a raw surplus ≥ 40 MW) — charge only under mFRR down`); }
   // OVERSHOOT GUARD (2026-11-13): under mFRR down the 1,000+ charges are the intervals where the raw sold−plan deviation is already
   // negative — the down activation is overshooting and aFRR up sets the price. 15 Oct – 13 Nov 2026, charges under the gate by raw
   // deviation in the first 5 minutes: < −80 MW → 60% ≥ 1,000 (mean 1,336); −80…−40 → 33% (892); −40…0 → 10% (474); ≥ 0 → 1% (325).
