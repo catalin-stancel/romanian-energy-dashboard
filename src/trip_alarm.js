@@ -9,6 +9,9 @@
 // price 3,536. Known trips caught: Brazi 22/23 Oct, 3 Nov and 16 Nov (-281 MW in one minute at 02:13), Rovinari 5 on 15 Nov
 // (-284 MW), Turceni/Rovinari 1 Sep and 29 Oct, Cernavoda stops 19 and 22 Aug. Mintia rule: 9 warnings, deficits after 7.
 // The dispatcher's mFRR up arrives about one interval after the trip; the price peak follows 2-4 intervals later.
+// MINTIA START (user 2026-11-17: "build a live alert when mintia starts"): the plant's feed field read 10 MW or less for at least
+// 3 minutes, then 30 MW or more on two readings in a row -> info level (blue banner, 4 beeps). Replay 1 Oct - 17 Nov: 15 alarms for the
+// 15 starts with an unbroken log, each 17-97 s after the first reading at 30 MW or more, no false start (5 Nov began inside a log gap); in November the unit then passed 100 MW 1-5 minutes after the start and 250 MW after 7-18.
 // Detection runs on a 20-s server timer (never in a request handler); the page polls /api/trip_alarm.
 
 const RULES = [
@@ -23,11 +26,14 @@ const ACTIVE_MS = 90 * 60000;   // an alarm stays on screen for 90 minutes unles
 const RECOVER = 0.3;            // cleared when the output is back within 30% of the drop
 const KEEP_MS = 12 * 60000;     // reading buffer
 const STATS = 'Jul–Nov 2026: 10 drops of this kind, 7 followed by a price above 2,500 RON within the hour (any interval: 6%), 8 by a deficit over 50 MW. mFRR up usually arrives one interval later.';
+const START_ON = 30, START_OFF = 10, START_QUIET_MS = 180000; // Mintia start: off level, on level, how long it must have been off
+const STATS_START = 'November 2026 starts: 100 MW within 1–5 minutes, 250 MW within 7–18 minutes when the run goes that far. Test runs were not in the day-ahead plan: at 250 MW or more the system was in surplus in 87% of intervals, average price 612 RON against 1,941 otherwise. Turbine 1 was announced to go commercial in the week of 16 Nov; once its runs are in the day-ahead plan a start no longer means un-notified surplus.';
 const STATS_MINT = 'Mintia unloads ahead of its plan field: 9 such drops since October, a deficit followed in 7.';
 const OUTAGE_URL = 'https://www.transelectrica.ro/ro/web/tel/productie';
 
 const buf = [];           // { ts, nuclear, coal, gasx, mint, mintPlan, sold, plan, storage }
 const pending = {};       // key -> { pre, preTs, ts }
+const mintState = { on: null, since: 0, lastOff: 0 }; // Mintia on/off as read from the feed (unknown after a restart: no start alarm until it has been seen off)
 const lastRaised = {};    // key -> feed ts of the last alarm
 let alarms = [];          // newest first; rows as stored
 let seq = 0;
@@ -99,11 +105,36 @@ function feed(db, sf, roDateIsp, naiveMs, opts) {
     for (const b of prev) { if (ts - b.ts > R.W * 1000 || b[R.key] == null) continue; if (b[R.key] > pre) { pre = b[R.key]; preTs = b.ts; } }
     if (preTs != null && v - pre <= -R.X && !(v <= 0 && R.key !== 'nuclear' && R.key !== 'mint')) pending[R.key] = { pre, preTs, ts, low: v };
   }
+  // Mintia start: off for the whole look-back (at least 3 minutes of readings), now on, confirmed by the next reading
+  if (!glitch && rd.mint != null) {
+    const p = pending.mint_start;
+    if (p) {
+      delete pending.mint_start;
+      if (ts - p.ts <= 180000 && rd.mint >= START_ON) {
+        const di = roDateIsp ? roDateIsp(o.wallMs != null ? new Date(o.wallMs) : now) : { date: null, isp: null };
+        const a = { id: null, raised_at: now.toISOString(), feed_ms: p.ts, date_ro: di.date, isp: di.isp, source: 'mint_start', level: 'info', drop_mw: rd.mint, from_mw: 0, to_mw: rd.mint,
+          window_s: Math.round((ts - p.offTs) / 1000), gap_mw: rd.plan != null && rd.sold != null ? rd.plan - rd.sold : null, storage_mw: rd.storage, hint: 'start', cleared_at: null, cleared_why: null };
+        lastRaised.mint_start = p.ts; alarms.unshift(a); out.raised.push(a);
+        writes.push(() => { const r = db.prepare('INSERT INTO trip_alarm(raised_at, feed_ms, date_ro, isp, source, level, drop_mw, from_mw, to_mw, window_s, gap_mw, storage_mw, hint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(a.raised_at, a.feed_ms, a.date_ro, a.isp, a.source, a.level, a.drop_mw, a.from_mw, a.to_mw, a.window_s, a.gap_mw, a.storage_mw, a.hint); a.id = Number(r.lastInsertRowid); });
+      }
+    } else if (rd.mint >= START_ON && mintState.on === false && ts - mintState.since >= START_QUIET_MS && ts - mintState.lastOff <= KEEP_MS
+      && !(lastRaised.mint_start && ts - lastRaised.mint_start < COOLDOWN_MS)) pending.mint_start = { ts, offTs: mintState.lastOff };
+    // state: on from 30 MW, off at 10 MW or less; readings in between keep the state (a slow ramp passes through them)
+    if (rd.mint >= START_ON) { if (mintState.on !== true) { mintState.on = true; mintState.since = ts; } }
+    else if (rd.mint <= START_OFF) { if (mintState.on !== false) { mintState.on = false; mintState.since = ts; } mintState.lastOff = ts; }
+  }
   // clear: recovered, or expired
   for (const a of alarms) {
     if (a.cleared_at) continue;
     const isFile = a.source === 'file';
     const v = isFile ? null : rd[a.source];
+    if (a.source === 'mint_start') { // cleared when the unit is off again, or after 90 minutes
+      const off = rd.mint != null && rd.mint <= START_OFF, exp = a.feed_ms != null && ts - a.feed_ms > ACTIVE_MS;
+      if (off || exp) { a.cleared_at = now.toISOString(); a.cleared_why = off ? 'Mintia back at 0 MW' : 'expired after 90 minutes'; out.cleared.push(a);
+        writes.push(() => { if (a.id != null) db.prepare('UPDATE trip_alarm SET cleared_at=?, cleared_why=? WHERE id=?').run(a.cleared_at, a.cleared_why, a.id); }); }
+      continue;
+    }
     const rec = !isFile && v != null && v >= a.from_mw - RECOVER * Math.abs(a.drop_mw);
     const old = isFile ? now.getTime() - new Date(a.raised_at).getTime() > ACTIVE_MS : a.feed_ms != null && ts - a.feed_ms > ACTIVE_MS;
     if (rec || old) { a.cleared_at = now.toISOString(); a.cleared_why = rec ? `output back at ${r0(v)} MW` : 'expired after 90 minutes'; out.cleared.push(a);
@@ -137,6 +168,9 @@ const describe = (a) => {
   if (a.source === 'file') return { id: a.id, level: a.level, source: 'Outage list', at: '', raised_at: a.raised_at, cleared_at: a.cleared_at, cleared_why: a.cleared_why, title: a.title || 'Outage list', text: a.hint || '', stats: STATS_FILE, url: OUTAGE_URL };
   const R = RULES.find((x) => x.key === a.source) || { label: a.source };
   const t = a.feed_ms != null ? new Date(a.feed_ms).toISOString().slice(11, 16) : '';
+  if (a.source === 'mint_start') { const tc = a.feed_ms != null ? new Date(a.feed_ms - 3600000).toISOString().slice(11, 16) : '';
+    return { id: a.id, level: 'info', source: 'Mintia', at: t, raised_at: a.raised_at, cleared_at: a.cleared_at, cleared_why: a.cleared_why, title: 'MINTIA START · ' + r0(a.to_mw) + ' MW and rising',
+      text: 'Mintia came on at ' + tc + ' CET: 0 → ' + r0(a.to_mw) + ' MW' + (a.gap_mw != null ? ' · border gap ' + (a.gap_mw >= 0 ? '+' : '−') + r0(Math.abs(a.gap_mw)) + ' MW' : '') + (a.storage_mw != null ? ' · batteries ' + r0(a.storage_mw) + ' MW' : ''), stats: STATS_START, url: OUTAGE_URL }; }
   return { id: a.id, level: a.level, source: R.label, at: t, raised_at: a.raised_at, cleared_at: a.cleared_at, cleared_why: a.cleared_why,
     title: a.level === 'trip' ? `UNIT TRIP · ${R.label} −${r0(-a.drop_mw)} MW` : `${R.label} unloading · −${r0(-a.drop_mw)} MW`,
     text: `${R.label} fell ${r0(a.from_mw)} → ${r0(a.to_mw)} MW in ${a.window_s < 90 ? a.window_s + ' s' : Math.round(a.window_s / 60) + ' min'} at ${t} (feed time) · likely ${a.hint}${a.gap_mw != null ? ' · border gap ' + (a.gap_mw >= 0 ? '+' : '−') + r0(Math.abs(a.gap_mw)) + ' MW' : ''}${a.storage_mw != null ? ' · batteries ' + r0(a.storage_mw) + ' MW' : ''}`,
@@ -147,16 +181,16 @@ function state() {
   return { seq, at: new Date().toISOString(), active: alarms.filter((a) => !a.cleared_at).map(describe), recent: alarms.filter((a) => a.cleared_at).slice(0, 8).map(describe),
     rules: RULES.map((r) => ({ source: r.label, mw: r.X, seconds: r.W, level: r.level })) };
 }
-function reset() { buf.length = 0; alarms = []; seq = 0; for (const k of Object.keys(pending)) delete pending[k]; for (const k of Object.keys(lastRaised)) delete lastRaised[k]; }
+function reset() { mintState.on = null; mintState.since = 0; mintState.lastOff = 0; buf.length = 0; alarms = []; seq = 0; for (const k of Object.keys(pending)) delete pending[k]; for (const k of Object.keys(lastRaised)) delete lastRaised[k]; }
 
 // Banner + sound for every page (injected through NAV). Plain string: no template placeholders.
 const clientHtml = [
   '<style>#tripbar{position:sticky;top:0;z-index:9999}#tripbar .trip{display:flex;gap:12px;align-items:flex-start;padding:10px 14px;font:600 14px/1.35 system-ui,Segoe UI,Arial,sans-serif;color:#fff;background:#b3121b;border-bottom:2px solid #ff6b61;animation:tripblink 1.2s steps(2,start) 8}',
-  '#tripbar .trip.warn{background:#8a5a00;border-bottom-color:#ffc14d}#tripbar .trip b{font-size:16px;white-space:nowrap}#tripbar .trip small{display:block;font-weight:500;opacity:.9;margin-top:2px}#tripbar .trip a{color:#fff;text-decoration:underline}',
+  '#tripbar .trip.warn{background:#8a5a00;border-bottom-color:#ffc14d}#tripbar .trip.info{background:#0b5fa5;border-bottom-color:#6cc0ff}#tripbar .trip b{font-size:16px;white-space:nowrap}#tripbar .trip small{display:block;font-weight:500;opacity:.9;margin-top:2px}#tripbar .trip a{color:#fff;text-decoration:underline}',
   '#tripbar .trip button{margin-left:auto;background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.5);border-radius:6px;padding:4px 10px;font:600 13px system-ui;cursor:pointer}',
   '#tripbell{position:fixed;right:10px;bottom:10px;z-index:9998;background:rgba(40,40,40,.85);color:#fff;border:1px solid #777;border-radius:16px;padding:5px 10px;font:600 12px system-ui;cursor:pointer;opacity:.75}#tripbell.on{border-color:#2fd27a;color:#2fd27a}',
   '@keyframes tripblink{0%{filter:brightness(1.35)}50%{filter:brightness(1)}}</style>',
-  '<div id="tripbar"></div><button id="tripbell" type="button" title="Unit-trip alarm: sound and desktop notification when nuclear, coal or gas output falls by 200 MW within 3 minutes (Mintia: 150 MW in 5 minutes). Click to switch the sound on or off; the browser needs one click per device before it may play it."></button>',
+  '<div id="tripbar"></div><button id="tripbell" type="button" title="Unit-trip alarm: sound and desktop notification when nuclear, coal or gas output falls by 200 MW within 3 minutes (Mintia: 150 MW in 5 minutes), and when Mintia starts (0 to 30 MW or more). Click to switch the sound on or off; the browser needs one click per device before it may play it."></button>',
   '<script>(function(){',
   'var bar=document.getElementById("tripbar"),bell=document.getElementById("tripbell"),ctx=null,seen={},first=true,baseTitle=document.title,flash=null;',
   'function on(){try{return localStorage.getItem("tripSound")!=="off";}catch(e){return true;}}',
@@ -166,9 +200,9 @@ const clientHtml = [
   'bell.onclick=function(){var was=on();try{localStorage.setItem("tripSound",was?"off":"on");}catch(e){}paintBell();if(!was){beep(2);if(window.Notification&&Notification.permission==="default")Notification.requestPermission();}};',
   'function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}',
   'function render(j){var dis=dismissed(),html="",fresh=[];(j.active||[]).forEach(function(a){var k=a.raised_at;if(dis[k])return;if(!seen[k]){seen[k]=1;if(!first||Date.now()-new Date(a.raised_at).getTime()<180000)fresh.push(a);}',
-  'html+="<div class=\\"trip"+(a.level==="warn"?" warn":"")+"\\"><b>\\u26A0 "+esc(a.title)+"</b><span>"+esc(a.text)+"<small>"+esc(a.stats)+" <a href=\\""+esc(a.url)+"\\" target=\\"_blank\\" rel=\\"noopener\\">Transelectrica outage list (point 5)</a></small></span><button type=\\"button\\" data-k=\\""+esc(k)+"\\">dismiss</button></div>";});',
+  'html+="<div class=\\"trip"+(a.level==="warn"?" warn":a.level==="info"?" info":"")+"\\"><b>\\u26A0 "+esc(a.title)+"</b><span>"+esc(a.text)+"<small>"+esc(a.stats)+" <a href=\\""+esc(a.url)+"\\" target=\\"_blank\\" rel=\\"noopener\\">Transelectrica outage list (point 5)</a></small></span><button type=\\"button\\" data-k=\\""+esc(k)+"\\">dismiss</button></div>";});',
   'bar.innerHTML=html;Array.prototype.forEach.call(bar.querySelectorAll("button"),function(b){b.onclick=function(){var d=dismissed();d[b.getAttribute("data-k")]=1;try{localStorage.setItem("tripDismissed",JSON.stringify(d));}catch(e){}b.parentNode.remove();stopFlash();};});',
-  'if(fresh.length){beep(fresh[0].level==="warn"?3:8);if(window.Notification&&Notification.permission==="granted"){try{new Notification(fresh[0].title,{body:fresh[0].text,requireInteraction:true});}catch(e){}}startFlash(fresh[0].title);}if(!html)stopFlash();first=false;}',
+  'if(fresh.length){beep(fresh[0].level==="warn"?3:fresh[0].level==="info"?4:8);if(window.Notification&&Notification.permission==="granted"){try{new Notification(fresh[0].title,{body:fresh[0].text,requireInteraction:true});}catch(e){}}startFlash(fresh[0].title);}if(!html)stopFlash();first=false;}',
   'function startFlash(t){stopFlash();var s=0;flash=setInterval(function(){document.title=(s++%2)?baseTitle:"\\u26A0 "+t;},1000);}function stopFlash(){if(flash){clearInterval(flash);flash=null;document.title=baseTitle;}}',
   'function tick(){fetch("/api/trip_alarm",{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){if(j)render(j);}).catch(function(){});}',
   'window.__tripRender=render;paintBell();tick();setInterval(tick,15000);',
