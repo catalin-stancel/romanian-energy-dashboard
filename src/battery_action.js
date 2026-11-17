@@ -104,6 +104,11 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
     const s1 = db.prepare('SELECT AVG(storage) v FROM sen_live WHERE ts_ms>? AND storage IS NOT NULL').get(t - 180000);
     const s0 = db.prepare('SELECT AVG(storage) v FROM sen_live WHERE ts_ms>? AND ts_ms<=? AND storage IS NOT NULL').get(t - 360000, t - 180000);
     if (s1 && s0 && s1.v != null && s0.v != null) f.stSlope = s1.v - s0.v;
+    // battery level of this interval so far against the last 5 minutes of the previous one (feed clock = Romanian wall time as UTC ms)
+    const st0 = Date.parse(date + 'T00:00:00Z') + (isp - 1) * 900000;
+    const c1 = db.prepare('SELECT AVG(storage) v, COUNT(*) n FROM sen_live WHERE ts_ms>=? AND ts_ms<? AND storage IS NOT NULL').get(st0, st0 + 900000);
+    const c0 = db.prepare('SELECT AVG(storage) v, COUNT(*) n FROM sen_live WHERE ts_ms>=? AND ts_ms<? AND storage IS NOT NULL').get(st0 - 300000, st0);
+    f.stAvg = c1 && c1.n >= 2 ? c1.v : null; f.stRise = f.stAvg != null && c0 && c0.n >= 2 ? f.stAvg - c0.v : null;
     // wind fleet change over the last 10 min (MW): a drop matching a running mFRR-down = the activation landing on wind farms
     const w1 = db.prepare('SELECT AVG(wind) v FROM sen_live WHERE ts_ms>? AND wind IS NOT NULL').get(t - 120000);
     const w0 = db.prepare('SELECT AVG(wind) v FROM sen_live WHERE ts_ms>? AND ts_ms<=? AND wind IS NOT NULL').get(t - 720000, t - 600000);
@@ -151,6 +156,8 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
 
 // Score the deficit evidence (+) vs surplus evidence (−) and turn it into an action. forNext = the interval after the live one:
 // same live state (persistence 0.93–0.97) but its own scheduled mFRR and a higher bar.
+const AFRR_TRIGGER = 1750, AFRR_STRONG = 2000, AFRR_WEAK = 1500, AFRR_DEV_MAX = 20; // aFRR-in-use: marginal (RON) for the flat-deviation trigger, for strong, for lean; highest deviation
+const RAMP_LEVEL = 200, RAMP_CUR = 50, RAMP_DEV_MAX = 20; // battery-ramp discharge: fleet average MW, rise on the end of the previous interval, highest deviation (surplus side)
 function decide(f, forNext) {
   const why = []; let s = 0;
   let dev = f.devTrue != null ? f.devTrue : f.dev, devNow = f.devNowTrue != null ? f.devNowTrue : f.devNow;
@@ -209,6 +216,46 @@ function decide(f, forNext) {
   // direction-only guard: never act against the visible sign (that is the one pattern that reads as an intentional imbalance)
   if (action === 'DISCHARGE' && dev > -40) { action = 'HOLD'; strength = null; why.push('→ HOLD: deficit evidence but the live sign is not in deficit'); }
   if (action === 'CHARGE' && dev < 40 && mDn < 300) { action = 'HOLD'; strength = null; why.push('→ HOLD: surplus evidence but the live sign is not in surplus'); }
+  // BATTERY RAMP (user 2026-11-17: "a good chance of big deficit looking at how batteries are pumping"): the batteries are the aFRR
+  // up that hides the deficit: the deviation reads flat BECAUSE they ramped, and aFRR is only published 16 minutes later. 1 Sep -
+  // 17 Nov 2026, first 5 minutes of the interval, deviation within 40 MW of zero: batteries at 200 MW or more and UP 50 MW or more on
+  // the last 5 minutes of the previous interval -> deficit 83%, price above PZU 79%, median 2,006 RON (116 intervals; up 100 MW or
+  // more: 89% / 89%, 45); batteries at 200 MW or more but steady or falling -> 63% / 58% (evening market sales, no signal). With
+  // mFRR down active the same picture settles in deficit 7% of the time (28), so it stays blocked. Lean only; the export bar applies.
+  // Replay of decide() before/after, 1 Sep - 16 Nov, one decision 5 minutes in: most of that class was already a discharge through
+  // mFRR up; with the deviation anywhere within 40 MW of zero the rule added 48 calls at 71% deficit, and the 19 with the deviation at
+  // +20 to +40 MW lost money (47% deficit, median 975). Cut at +20 MW: 29 added calls, 86% deficit, 79% above PZU, median 2,133 RON,
+  // 7% under 1,000, +1,221 RON/MWh against PZU on average; no other decision changes.
+  // Current interval only: for the NEXT interval the same picture (rise of 100 MW or more) gave 12 calls at 75% deficit, under the
+  // 87% of the next-row calls, so it is not applied there.
+  if (!forNext && action === 'HOLD' && s >= 0 && !(mDn > 0) && f.dev != null && f.dev > -40 && f.dev <= RAMP_DEV_MAX && dev <= RAMP_DEV_MAX && f.stAvg != null && f.stAvg >= RAMP_LEVEL && f.stRise != null && f.stRise >= RAMP_CUR) {
+    action = 'DISCHARGE'; strength = 'lean';
+    why.push(`BATTERY RAMP: deviation flat (${f.dev >= 0 ? '+' : ''}${r0(f.dev)} MW) but the batteries average ${r0(f.stAvg)} MW this interval, up ${r0(f.stRise)} MW on the end of the previous one, no mFRR down: the batteries are covering a deficit (29 calls this rule would have added since September: 86% deficit, 79% above PZU, median 2,133 RON)`);
+  }
+  // aFRR IN USE (user 2026-11-17: "the deficit might be 20-30 because the border didn't allow more, but because expensive aFRR was
+  // used it is very expensive ... think about the aFRR that might have been used and not the deficit number"). Settled data, 1 Sep -
+  // 17 Nov 2026, 3,782 deficit intervals: the price ranks with the deficit size at 0.33, with the aFRR up activated at 0.55, with the
+  // aFRR-up marginal at 0.88 (within 10% of it in 75%). At the same aFRR level the deficit size changes nothing: under 20 MW of aFRR
+  // up the median price is 1,340-1,480 from a 20 MW deficit to a 400 MW one (the rest is covered by mFRR, netting and the border);
+  // at 120-200 MW of aFRR up it is 2,050-3,360. The aFRR of the running interval is published 16 minutes late; what IS known a few
+  // minutes in is the aFRR-up marginal of the interval that just ended (stored about 5 minutes after it ends).
+  // (1) Trigger without a visible deficit, current interval only: pre-activation deviation between -40 and +20 MW, no mFRR down,
+  //     no surplus evidence, previous interval's aFRR-up marginal at 1,750 or more. Replay of the holds this turns into discharges:
+  //     marginal 2,000 or more -> 250 calls, 87% deficit, 89% above PZU, median 2,201, +1,128 RON/MWh against PZU; 1,750-2,000 ->
+  //     168 calls, 87% / 84%, median 1,926, +500. (1,500-1,750: 80% / 78%, +299, left out; next interval: 76%, left out.)
+  // (2) Strength follows the aFRR price, not the deficit MW: a discharge is strong when that marginal (at most 2 intervals old) is
+  //     2,000 or more and lean when it is under 1,500. Replay: strong by score but marginal under 1,500 earned +461 RON/MWh (455
+  //     calls), lean by score but marginal 2,000 or more earned +1,856 (135 calls).
+  const mpFresh = f.lastMp != null && f.lastMpAge != null && f.lastMpAge <= 2;
+  let flatCall = action === 'DISCHARGE' && strength === 'lean' && dev > -40; // the battery-ramp call above
+  if (!forNext && action === 'HOLD' && s >= 0 && !(mDn > 0) && dev > -40 && dev <= AFRR_DEV_MAX && f.lastMp != null && f.lastMpAge === 1 && f.lastMp >= AFRR_TRIGGER) {
+    action = 'DISCHARGE'; strength = 'lean'; flatCall = true;
+    why.push(`aFRR IN USE: deviation flat (${dev >= 0 ? '+' : ''}${r0(dev)} MW) but the aFRR-up marginal of the interval that just ended is ${r0(f.lastMp)} RON, no mFRR down: expensive aFRR is covering a deficit the border does not show (${f.lastMp >= 2000 ? '250 similar holds since September: 87% deficit, 89% above PZU, median 2,201 RON' : '168 similar holds since September: 87% deficit, 84% above PZU, median 1,926 RON'})`);
+  }
+  if (action === 'DISCHARGE' && mpFresh && !flatCall) {
+    if (f.lastMp >= AFRR_STRONG && strength !== 'strong') { strength = 'strong'; why.push(`strong: last aFRR-up marginal ${r0(f.lastMp)} RON (${f.lastMpAge} ISP ago) — the price follows the aFRR in use, not the deficit size`); }
+    else if (f.lastMp < AFRR_WEAK && strength === 'strong') { strength = 'lean'; why.push(`lean: last aFRR-up marginal only ${r0(f.lastMp)} RON (${f.lastMpAge} ISP ago) — a large deficit covered without expensive aFRR settles near 1,450`); }
+  }
   // CHARGE ONLY UNDER mFRR DOWN (user 2026-11-12): a charge is called only while Transelectrica has mFRR down scheduled for the
   // interval — then the surplus is the operator's own read and the price is the scheduled down marginal, known in advance. Sep 1 –
   // Nov 12 2026: 1,176 intervals under scheduled mFRR down settled in surplus 88% of the time, median price 254 RON, 87% below PZU.

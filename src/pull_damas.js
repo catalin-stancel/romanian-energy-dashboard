@@ -3,6 +3,8 @@
 //
 //   node tool\pull_damas.js backfill 2024-06-01 2026-06-12
 //   node tool\pull_damas.js update          (last 2 days + today; schedule every 5-15 min)
+//   node tool\pull_damas.js fast            (marginal prices only, yesterday + today; schedule every minute — the
+//                                            Battery column reads the aFRR-up marginal of the interval that just ended)
 //
 // Discovered endpoint (no auth):
 //   GET https://newmarkets.transelectrica.ro/usy-durom-publicreportg01/00121002500000000000000000000100/
@@ -73,11 +75,13 @@ async function fetchInterval(cmd, fromIso, toIso) {
 
 const num = (v) => { const n = Number(v); return v !== null && v !== undefined && Number.isFinite(n) ? n : null; };
 
-async function pull(db, from, to) {
+const FAST = ['marginalPricesOverview']; // reports of the every-minute pull
+async function pull(db, from, to, only) {
   const upsert = makeUpserter(db);
   const counts = {};
   const CHUNK = 7 * 86400000;
   for (const rep of REPORTS) {
+    if (only && !only.includes(rep.cmd)) continue;
     let total = 0;
     for (let t = from.getTime(); t < to.getTime(); t += CHUNK) {
       const tEnd = Math.min(to.getTime(), t + CHUNK);
@@ -109,7 +113,7 @@ async function pull(db, from, to) {
       await sleep(350);
     }
     counts[rep.cmd] = total;
-    console.log(`  ${rep.cmd}: ${total} points`);
+    if (!only) console.log(`  ${rep.cmd}: ${total} points`);
   }
   return Object.values(counts).reduce((a, b) => a + b, 0);
 }
@@ -127,12 +131,17 @@ async function main() {
     const todayUtc = new Date().toISOString().slice(0, 10);
     from = new Date(new Date(todayUtc + 'T00:00:00Z').getTime() - 2 * 86400000);
     to = new Date(new Date(todayUtc + 'T00:00:00Z').getTime() + 86400000);
+  } else if (mode === 'fast') {
+    const todayUtc = new Date().toISOString().slice(0, 10); // same UTC-midnight anchoring as update
+    from = new Date(new Date(todayUtc + 'T00:00:00Z').getTime() - 86400000);
+    to = new Date(new Date(todayUtc + 'T00:00:00Z').getTime() + 86400000);
   } else {
-    console.error('Usage: pull_damas.js backfill <from> <to> | update');
+    console.error('Usage: pull_damas.js backfill <from> <to> | update | fast');
     process.exit(1);
   }
   const started = new Date().toISOString();
-  const n = await pull(db, from, to);
+  const n = await pull(db, from, to, mode === 'fast' ? FAST : null);
+  if (mode === 'fast') return; // quiet: no pull-log row and no log line every minute (errors still print)
   logPull(db, 'damas:estimatedImbalancePrices', `${mode} ${from.toISOString()}..${to.toISOString()}`, started, new Date().toISOString(), n, null);
   console.log(`stored ${n} points`);
 }

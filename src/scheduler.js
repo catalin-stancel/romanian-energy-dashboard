@@ -6,6 +6,8 @@ const path = require('path');
 
 const JOBS = [
   { name: 'damas', script: 'pull_damas.js', args: ['update'], everyMin: 5 },
+  // marginal prices only, every minute: the Battery column reads the aFRR-up marginal of the interval that just ended
+  { name: 'damas_fast', script: 'pull_damas.js', args: ['fast'], everyMin: 1 },
   { name: 'entsoe', script: 'pull_entsoe.js', args: ['update'], everyMin: 15 },
   { name: 'opcom', script: 'pull_opcom.js', args: ['update'], everyMin: 30 },
   { name: 'weather', script: 'pull_weather.js', args: [], everyMin: 60 },
