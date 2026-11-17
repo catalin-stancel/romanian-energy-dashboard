@@ -766,6 +766,7 @@ tr.gateopen td{background:var(--tint-pos-strong)!important;border-top:3px solid 
 tr.gateopen td:first-child{border-left:3px solid var(--ic-s)}
 tr.gateopen td:last-child{border-right:3px solid var(--ic-s)}
 .tradearrow{color:var(--ic-s);font-weight:800}
+.hyc{color:#2f8fd8;font-weight:700;cursor:help}.hyc.hycw{font-weight:400;opacity:.65}.hyc.hycq{color:#d98a00}
 .ivtimer{font:700 12px var(--font-mono);color:var(--fg);background:var(--bg-surface);padding:0 6px;border-radius:6px;white-space:nowrap;display:inline-block;min-width:4.2em;text-align:center;font-variant-numeric:tabular-nums}
 .lockico{font-size:11px;filter:grayscale(.2)}
 .cur{opacity:.45;font-weight:400;font-size:10px}
@@ -1485,6 +1486,7 @@ const tripAlarm = require('./trip_alarm');
 try { tripAlarm.ensureTable(db); tripAlarm.load(db); } catch (e) { console.error('trip_alarm table:', e.message); }
 // outage-file watcher (2026-11-16): Transelectrica 7productie5.xls (units > 100 MW withdrawn / tripped) → alarm on new entries
 const outageWatch = require('./outage_watch');
+const hydroCommon = require('./hydro_common'); // common hydro change marker in the Predict time column (2026-11-17)
 try { outageWatch.ensureTable(db); } catch (e) { console.error('outage_entry table:', e.message); }
 let _outageErrAt = 0;
 const outageTick = () => outageWatch.poll(db).then((r) => { if (r && r.changed) console.log(`outage file: version ${r.modified}, ${r.entries} entries, ${r.added} new, ${r.updated} changed, ${r.alarms} alarm(s)${r.seeded ? '' : ' (first run: recorded only)'}`); })
@@ -2480,6 +2482,7 @@ async function predictPage(date) {
   const pdTemp = wxTempMap(); // hour → forecast temperature (the curve models' AC-load term)
   let pdSolar = new Map(); // D-1 solar forecast per isp (curve beta basis + the dispatchable-plan derivation)
   try { pdSolar = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_solar' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
+  const hyCommon = hydroCommon.profile(db, date); // isp → common hydro change at this clock time (same day type, rolling)
   let pdWind = new Map(); // D-1 wind forecast per isp (dispatchable-plan derivation)
   try { pdWind = new Map(db.prepare("SELECT isp, value FROM series WHERE series='ws_fc_da_wind_onshore' AND date_ro=? AND value IS NOT NULL").all(date).map((r) => [r.isp, r.value])); } catch { /* ignore */ }
   // key 0 = last interval of the previous day, so row 1's dispatchable-plan step (💧 hydro start/stop marker) carries across midnight (bug 2026-11-02)
@@ -2650,7 +2653,7 @@ async function predictPage(date) {
         if (u.hi == null && u.he == null && u.bi == null && u.be == null) return '';
         const f = (v) => (v == null ? '–' : `<span${v >= 90 ? ' style="color:var(--neg,#d93a30);font-weight:700"' : v >= 75 ? ' style="color:#d2691e;font-weight:600"' : ''}>${v}</span>`);
         return ` <small class="xbutil" title="border capacity used this interval — H = Hungary import/export (vs the OFFICIAL flow-based max bilateral exchange, JAO Core, hourly), B = Bulgaria import/export (vs official NTC). Amber ≥75%, red ≥90%. Readings >100% = the commercial paper exceeds the official net max (netted/virtual schedules — the physical flow cannot).">H${f(u.hi)}/${f(u.he)} B${f(u.bi)}/${f(u.be)}</small>`;
-      })()}</td><td style="white-space:nowrap">${cetLabel(isp, date)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
+      })()}</td><td style="white-space:nowrap">${cetLabel(isp, date)}${hydroCommon.mark(hyCommon.get(isp), dispStep)}${gateBoundary ? ` <span class="ivtimer" data-end="${curIspStartMs + 900000}" title="time until this interval locks (trading closes) and the gate advances to the next">–:––</span>` : ''}</td>
       <td>${imb !== null ? `<span>${dirIcon(imb > 0) + ' ' + fmt(Math.abs(imb))}</span>` + (plv != null && plv.lean != null ? ` <small class="xbf ${Math.sign(plv.lean) === Math.sign(imb) ? 'fc-ok' : 'fc-bad'}" title="imbalance lean as recorded at the 75-min gate, vs realized (green = sign matched)">(${plv.lean > 0 ? 'S' : 'D'} ${fmt(Math.abs(plv.lean))})</small>` : '') : (() => {
         // forward imbalance value = the PHYSICAL-IDENTITY lean (user-spec 2026-07-03): (Fcst Real X-B − Notif X-B)/4 MWh.
         // Honest caveat baked into the tooltip: at the 75-min lead this lean's SIGN is ~coin-flip (52% validated,
@@ -2719,7 +2722,7 @@ ${huBar}<div id="pulsebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px
 <div id="scorebar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="pibar" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
 <div id="resscore" style="margin:0 0 8px;font-size:12px;padding:6px 11px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-2);display:none"></div>
-<table data-damas="${P.size ? 1 : 0}"><caption class="gatecap">${gateCaption}</caption><tr><th>Int<span class="xbutgl" onclick="toggleXbu()" title="show/hide the per-interval border capacity used — H = Hungary imp/exp (vs JAO flow-based max), B = Bulgaria imp/exp (vs official NTC)"></span></th><th>CET</th>${head}</tr>
+<table data-damas="${P.size ? 1 : 0}"><caption class="gatecap">${gateCaption}</caption><tr><th>Int<span class="xbutgl" onclick="toggleXbu()" title="show/hide the per-interval border capacity used — H = Hungary imp/exp (vs JAO flow-based max), B = Bulgaria imp/exp (vs official NTC)"></span></th><th>CET <span class="help" tabindex="0">ⓘ<span class="tip">Interval start, CET. ▲/▼ + MW = COMMON HYDRO CHANGE: hydro stepped by 100 MW or more in that direction at this clock time on at least half of the last 14 weekdays (8 weekend days on a weekend); the number is the typical size. Bold = 70% of the days or more, faded = 50–70%. Blue = today’s day-ahead plan shows the step too (hydro then follows 7 times in 10, 8 in 10 on bold slots). Amber with ? = usual at this time but NOT in today’s plan: the full step came 1 time in 4 (1 in 2 on bold slots). Hidden when today’s plan steps the other way — hydro follows the plan. Tested day by day on Jun–Nov 2026: 5–6 markers a day; half of all hydro steps of 150 MW or more happen outside these times, so the marker shows the routine, not the surprises. Hover a marker for its counts.</span></span></th>${head}</tr>
 ${body}</table></div>
 <script>document.addEventListener('click',function(ev){var h=ev.target.closest('.help');
   document.querySelectorAll('.help.show').forEach(function(x){if(x!==h)x.classList.remove('show')});
