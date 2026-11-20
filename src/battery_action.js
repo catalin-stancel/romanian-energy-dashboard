@@ -136,6 +136,10 @@ function features(db, date, isp, sf, stMode, pub, prices, nowIsp) {
     const r = db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_mp_afrr_up' AND isp<? AND isp>=? AND value>0 ORDER BY isp DESC LIMIT 1").get(date, nowIsp || isp, (nowIsp || isp) - 4);
     if (r) { f.lastMp = r.value; f.lastMpAge = (nowIsp || isp) - r.isp; }
   } catch { /* series missing */ }
+  f.prevMpUp = f.prevMpDn = null; // both aFRR marginals of the interval that just ended, zero included (0 = that direction was not used)
+  try {
+    for (const r of db.prepare("SELECT series, value FROM series WHERE date_ro=? AND isp=? AND series IN ('damas_mp_afrr_up','damas_mp_afrr_down')").all(date, (nowIsp || isp) - 1)) { if (r.series === 'damas_mp_afrr_up') f.prevMpUp = r.value; else f.prevMpDn = r.value; }
+  } catch { /* series missing */ }
   f.schPriceL = f.schPriceN = null;
   try { // scheduled mFRR-up marginal price (marginalPricesOverview, mFRR_Up_Scheduled) — known at/just before the interval start
     for (const r of db.prepare("SELECT isp, value FROM series WHERE date_ro=? AND series='damas_mp_mfrr_up_sch' AND isp IN (?,?) AND value>0").all(date, isp, isp + 1)) { if (r.isp === isp) f.schPriceL = r.value; else f.schPriceN = r.value; }
@@ -239,6 +243,27 @@ function decide(f, forNext) {
   if (action === 'DISCHARGE' && mpFresh && !flatCall) {
     if (f.lastMp >= AFRR_STRONG && strength !== 'strong') { strength = 'strong'; why.push(`strong: last aFRR-up marginal ${r0(f.lastMp)} RON (${f.lastMpAge} ISP ago) — the price follows the aFRR in use, not the deficit size`); }
     else if (f.lastMp < AFRR_WEAK && strength === 'strong') { strength = 'lean'; why.push(`lean: last aFRR-up marginal only ${r0(f.lastMp)} RON (${f.lastMpAge} ISP ago) — a large deficit covered without expensive aFRR settles near 1,450`); }
+  }
+  // aFRR TURNED DOWN (user 2026-11-20, after 01:45 CET that day: discharge called with 200 MW of mFRR up still running, the deficit
+  // already gone, interval settled +9 MW surplus at -2,851 RON). With mFRR up running the settled sign decides everything: an
+  // imbalance of -20..0 MW settles at a median 1,782 RON, one of 0..+20 MW at 600. The "pre-activation" deficit (raw deviation minus
+  // the mFRR) cannot see that flip; what does is the aFRR of the interval that just ended (marginals published about minute 2-3).
+  // Replay of current-interval discharges, 1 Sep - 20 Nov 2026 (2,356 calls, 8% settled in surplus), each cut negative in both halves:
+  //   (a) previous aFRR-down marginal below 0               -> 23 calls, 57% surplus, median 41 RON, -946 RON/MWh against PZU
+  //   (b) no mFRR up and previous aFRR-up marginal 0        -> 44 calls, 30% surplus, median 999, -277
+  //   (c) mFRR up, raw deviation above half the mFRR and previous aFRR-up marginal under 1,500 -> 50 calls, 70% surplus, median 700, -405
+  // Tested and left out (user 2026-11-20): (d) mFRR up, raw deviation above +20 and previous aFRR-up marginal 0 — the 01:45 case
+  //   itself. After (a)-(c) it held 31 calls that earned +253 RON/MWh on average (24 good calls worth 14.8k given up, 7 losing
+  //   ones worth 6.9k avoided, negative in every month); it only bought protection against one -2,851 call.
+  // (a)-(c) together: 103 of 2,356 discharges held, -440 RON/MWh against PZU; total gain against PZU 1,998k -> 2,044k, positive
+  // in every month and in 12 of 12 weeks; negative-price discharges 18 -> 6; good calls given up: 34, worth 15.9k of 2,165k.
+  // Current interval only (the next-interval call has no settled aFRR of its own to read).
+  if (!forNext && action === 'DISCHARGE' && (f.prevMpDn != null || f.prevMpUp != null)) {
+    const mUpNow = f.mUpL || 0; let turn = null;
+    if (f.prevMpDn != null && f.prevMpDn < 0) turn = `the aFRR-down marginal of the interval that just ended is ${r0(f.prevMpDn)} RON (23 similar calls: 57% settled in surplus, median 41 RON)`;
+    else if (!(mUpNow > 0) && f.prevMpUp === 0) turn = 'no aFRR up was used in the interval that just ended and no mFRR up is running (44 similar calls: 30% surplus, median 999 RON, 277 under PZU on average)';
+    else if (mUpNow > 0 && f.dev != null && f.dev > mUpNow / 2 && f.prevMpUp != null && f.prevMpUp < 1500) turn = `the raw deviation (+${r0(f.dev)} MW) is over half the ${r0(mUpNow)} MW of mFRR up and the last aFRR-up marginal is only ${r0(f.prevMpUp)} RON: the activation is overshooting (50 similar calls: 70% surplus, median 700 RON)`;
+    if (turn) { action = 'HOLD'; strength = null; why.push('→ HOLD: aFRR TURNED DOWN — ' + turn); }
   }
   // CHARGE ONLY UNDER mFRR DOWN (user 2026-11-12): a charge is called only while Transelectrica has mFRR down scheduled for the
   // interval — then the surplus is the operator's own read and the price is the scheduled down marginal, known in advance. Sep 1 –
